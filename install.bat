@@ -1,28 +1,33 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-where node >nul 2>nul
-if errorlevel 1 (
-  echo Установите Node.js 24 LTS с https://nodejs.org/
-  pause
-  exit /b 1
-)
-node -e "process.exit(Number(process.versions.node.split('.')[0]) >= 24 ? 0 : 1)"
-if errorlevel 1 (
-  echo Требуется Node.js 24 LTS или новее.
-  pause
-  exit /b 1
-)
+
+where node.exe >nul 2>nul
+if errorlevel 1 goto missing_node
+node -e "process.exit(Number(process.versions.node.split('.')[0]) < 24 ? 1 : 0)"
+if errorlevel 1 goto old_node
+
+echo Installing dependencies...
 call npm ci
-if errorlevel 1 (
-  echo Не удалось установить зависимости. Проверьте интернет и сообщения выше.
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto failed
+echo Building Family Albums...
 call npm run build
-if errorlevel 1 (
-  echo Ошибка сборки.
-  pause
-  exit /b 1
-)
-echo Установка завершена. Откройте start.bat.
+if errorlevel 1 goto failed
+
+echo.
+echo Installation complete. Open start.bat to launch Family Albums.
+exit /b 0
+
+:missing_node
+echo Node.js was not found. Install Node.js 24 LTS from https://nodejs.org/
+goto failed
+
+:old_node
+echo Node.js 24 or newer is required. Download it from https://nodejs.org/
+goto failed
+
+:failed
+echo.
+echo Installation failed. Please copy the error above.
+pause
+exit /b 1
