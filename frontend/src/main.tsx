@@ -10,6 +10,14 @@ import React, {
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import Landing from "./Landing";
+import {
+  PlaceFields,
+  MemoriesPage,
+  StoragePanel,
+  BrowserNotificationsSetting,
+  useFamilyNotifications,
+  MemberAccess,
+} from "./family-features";
 import { ThemeProvider, useTheme } from "./theme";
 import type { Theme } from "./theme";
 import {
@@ -51,6 +59,7 @@ import {
   LogOut,
   Shield,
   Sun,
+  Sparkles,
   Moon,
   MessageCircle,
   Share2,
@@ -216,6 +225,15 @@ function App() {
     [place, setPlace] = useState(""),
     [fileType, setFileType] = useState(""),
     [showFilters, setShowFilters] = useState(false);
+  useFamilyNotifications(
+    state.user,
+    (items) => setState((current) => ({ ...current, notifications: items })),
+    () => void refresh(),
+  );
+  useEffect(() => {
+    document.documentElement.dataset.motion =
+      state.user?.settings.animations === false ? "reduced" : "full";
+  }, [state.user?.settings.animations]);
   const refresh = useCallback(async () => {
     try {
       const me = await api("/me");
@@ -229,7 +247,13 @@ function App() {
   }, []);
   useEffect(() => {
     void refresh();
+    const focus = () => void refresh();
+    window.addEventListener("focus", focus);
+    return () => window.removeEventListener("focus", focus);
   }, [refresh]);
+  useEffect(() => {
+    if (viewer && !state.media.some((m) => m.id === viewer)) setViewer(null);
+  }, [state.media, viewer]);
   useLayoutEffect(() => {
     if (!state.user) return;
     const account = state.user;
@@ -356,15 +380,6 @@ function App() {
   if (page === "photos")
     media = media.filter((m) => m.mime.startsWith("image"));
   if (page === "favorites") media = media.filter((m) => m.favorite);
-  if (page === "memories") {
-    const now = new Date();
-    media = media.filter(
-      (m) =>
-        new Date(m.meta.taken || m.created).getMonth() === now.getMonth() &&
-        new Date(m.meta.taken || m.created).getDate() === now.getDate() &&
-        new Date(m.meta.taken || m.created).getFullYear() < now.getFullYear(),
-    );
-  }
   if (detailId) media = media.filter((m) => m.entities.includes(detailId));
   if (year)
     media = media.filter(
@@ -742,10 +757,7 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="storage">
-            <span>Хранилище</span>
-            <strong>{size(state.bytes)}</strong>
-          </div>
+          <StoragePanel version={state.bytes} compact />
           <Link
             className={
               page === "settings" ? "settings-link active" : "settings-link"
@@ -981,6 +993,17 @@ function App() {
                             " видео"
                           : descriptions[page])}
                     </p>
+                    {currentEntity?.place && (
+                      <Link
+                        className="album-place"
+                        to={"/places/" + currentEntity.place}
+                      >
+                        <MapPin size={17} />
+                        {state.entities.find(
+                          (e) => e.id === currentEntity.place,
+                        )?.name || "Место события"}
+                      </Link>
+                    )}
                   </>
                 )}
               </div>
@@ -1019,6 +1042,14 @@ function App() {
                   state={state}
                   perform={perform}
                   setModal={setModal}
+                />
+              ) : page === "memories" ? (
+                <MemoriesPage
+                  files={live}
+                  entities={state.entities}
+                  query={query}
+                  onOpen={setViewer}
+                  onUpload={openUpload}
                 />
               ) : (
                 <>
@@ -1285,21 +1316,27 @@ function App() {
                             }
                           />
                         )}
-                      {page === "places" && !detailId && (
-                        <>
-                          <Suspense
-                            fallback={
-                              <div className="places-map">Загружаем карту…</div>
-                            }
-                          >
-                            <PlacesMap
-                              entities={entities}
-                              media={live}
-                              navigate={navigate}
-                            />
-                          </Suspense>
-                        </>
-                      )}
+                      {page === "places" &&
+                        !detailId &&
+                        entities.some(
+                          (e) => e.latitude !== null && e.longitude !== null,
+                        ) && (
+                          <>
+                            <Suspense
+                              fallback={
+                                <div className="places-map">
+                                  Загружаем карту…
+                                </div>
+                              }
+                            >
+                              <PlacesMap
+                                entities={entities}
+                                media={live}
+                                navigate={navigate}
+                              />
+                            </Suspense>
+                          </>
+                        )}
                       {page === "people" && !detailId && (
                         <p className="hint">
                           Ручная разметка · добавляйте людей к фотографиям в
@@ -1662,19 +1699,21 @@ function Auth({
         <p className="error" role="alert">
           {error}
         </p>
-        <button className="primary" disabled={busy}>
-          {busy ? "Подождите…" : register ? "Создать аккаунт" : "Войти"}
-        </button>
-        <button
-          type="button"
-          className="text-button"
-          onClick={() => {
-            setRegister(!register);
-            setError("");
-          }}
-        >
-          {register ? "Уже есть аккаунт? Войти" : "Создать новый аккаунт"}
-        </button>
+        <div className="auth-actions">
+          <button className="primary" disabled={busy}>
+            {busy ? "Подождите…" : register ? "Создать аккаунт" : "Войти"}
+          </button>
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => {
+              setRegister(!register);
+              setError("");
+            }}
+          >
+            {register ? "Уже есть аккаунт? Войти" : "Создать новый аккаунт"}
+          </button>
+        </div>
       </form>
     </ModalFrame>
   );
@@ -1716,6 +1755,7 @@ function EntityForm({
             b = Object.fromEntries(f);
           await onSave({
             ...b,
+            place: b.place === "new" ? "" : b.place,
             latitude: b.latitude ? Number(b.latitude) : null,
             longitude: b.longitude ? Number(b.longitude) : null,
             invited: f.getAll("invited"),
@@ -1782,6 +1822,14 @@ function EntityForm({
         </label>
         {kind === "albums" && (
           <>
+            <PlaceFields
+              state={state}
+              space={
+                entity?.space ||
+                state.spaces.find((s) => s.role === "owner")?.id
+              }
+              initial={entity?.place}
+            />
             <label>
               Дата события
               <DateField name="eventDate" defaultValue={entity?.eventDate} />
@@ -1825,30 +1873,33 @@ function EntityForm({
           </>
         )}
         {kind === "places" && (
-          <div className="two-fields">
-            <label>
-              Широта
-              <input
-                type="number"
-                name="latitude"
-                min="-90"
-                max="90"
-                step="any"
-                defaultValue={entity?.latitude ?? ""}
-              />
-            </label>
-            <label>
-              Долгота
-              <input
-                type="number"
-                name="longitude"
-                min="-180"
-                max="180"
-                step="any"
-                defaultValue={entity?.longitude ?? ""}
-              />
-            </label>
-          </div>
+          <details className="manual-map-point">
+            <summary>Указать точку на карте вручную (необязательно)</summary>
+            <div className="two-fields">
+              <label>
+                Широта
+                <input
+                  type="number"
+                  name="latitude"
+                  min="-90"
+                  max="90"
+                  step="any"
+                  defaultValue={entity?.latitude ?? ""}
+                />
+              </label>
+              <label>
+                Долгота
+                <input
+                  type="number"
+                  name="longitude"
+                  min="-180"
+                  max="180"
+                  step="any"
+                  defaultValue={entity?.longitude ?? ""}
+                />
+              </label>
+            </div>
+          </details>
         )}
         <div className="modal-actions">
           {entity && (
@@ -1900,12 +1951,20 @@ function UploadModal({
 }) {
   const { confirm, prompt } = useDialogs();
   const initial = state.entities.find(
-    (e) => e.id === initialEntity && e.owner === state.user?.id,
+    (e) =>
+      e.id === initialEntity &&
+      (e.owner === state.user?.id || ["places", "albums"].includes(e.kind)) &&
+      state.spaces.some((s) => s.id === e.space && s.role !== "guest"),
   );
-  const space =
-    initial?.space || state.spaces.find((s) => s.role === "owner")?.id;
+  const [space, setSpace] = useState(
+    initial?.space || state.spaces.find((s) => s.role === "owner")?.id || "",
+  );
   const [queue, setQueue] = useState<QueueFile[]>([]),
     [album, setAlbum] = useState(initial?.kind === "albums" ? initial.id : ""),
+    [uploadPlace, setUploadPlace] = useState(
+      initial?.kind === "places" ? initial.id : "",
+    ),
+    [placeName, setPlaceName] = useState(""),
     [tags, setTags] = useState<string[]>(
       initial?.kind === "tags" ? [initial.id] : [],
     ),
@@ -1932,6 +1991,10 @@ function UploadModal({
       setQueue((q) => q.map((f) => (f.id === id ? { ...f, ...b } : f)));
   };
   const add = (files: FileList | File[]) => {
+    if (uploadPlace === "new" && !placeName.trim()) {
+      setError("Впишите название нового места");
+      return;
+    }
     setError("");
     const accepted: QueueFile[] = [];
     for (const file of Array.from(files)) {
@@ -1971,6 +2034,20 @@ function UploadModal({
       const form = new FormData();
       form.append("file", entry.file);
       if (space) form.append("space", space);
+      form.append(
+        "entities",
+        JSON.stringify(
+          [
+            album,
+            ...tags,
+            initial && !["albums", "tags", "places"].includes(initial.kind)
+              ? initial.id
+              : "",
+          ].filter(Boolean),
+        ),
+      );
+      form.append("place", uploadPlace === "new" ? "" : uploadPlace);
+      form.append("placeName", uploadPlace === "new" ? placeName : "");
       try {
         const id = await new Promise<string>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
@@ -2028,7 +2105,11 @@ function UploadModal({
         initial && !["albums", "tags"].includes(initial.kind) ? initial.id : "",
       ].filter(Boolean);
       for (const file of queue.filter((f) => f.status === "saved"))
-        await api("/media/" + file.serverId, "PATCH", { entities: ids });
+        await api("/media/" + file.serverId, "PATCH", {
+          entities: ids,
+          place: uploadPlace === "new" ? "" : uploadPlace,
+          placeName: uploadPlace === "new" ? placeName : "",
+        });
       await onUploaded();
       onClose();
     } catch (e) {
@@ -2055,6 +2136,140 @@ function UploadModal({
         Файлы сохраняются сразу после выбора. В архиве появляются готовые
         фотографии и миниатюры.
       </p>
+      <div className="upload-destination">
+        <h3>Куда сохраним воспоминания?</h3>
+        <p>
+          Выберите альбом и место до добавления файлов. Фотографии сразу получат
+          нужный доступ.
+        </p>
+        {state.spaces.filter((s) => s.role !== "guest").length > 1 && (
+          <label>
+            Семья
+            <Select
+              aria-label="Семья для загрузки"
+              value={space}
+              disabled={queue.length > 0}
+              onChange={(e) => {
+                setSpace(e.target.value);
+                setAlbum("");
+                setTags([]);
+                setUploadPlace("");
+                setPlaceName("");
+              }}
+            >
+              {state.spaces
+                .filter((s) => s.role !== "guest")
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name +
+                      (s.role === "owner"
+                        ? " · моя семья"
+                        : " · " + s.ownerName)}
+                  </option>
+                ))}
+            </Select>
+          </label>
+        )}
+        <label>
+          Альбом
+          <Select
+            aria-label="Альбом"
+            value={album}
+            disabled={saving || queue.length > 0}
+            onChange={(e) => setAlbum(e.target.value)}
+          >
+            <option value="">Без альбома</option>
+            {state.entities
+              .filter((e) => e.kind === "albums" && e.space === space)
+              .map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+          </Select>
+        </label>
+        <button
+          className="text-button"
+          disabled={saving || queue.length > 0}
+          onClick={async () => {
+            const name = await prompt("Как назовём новый альбом?");
+            if (name?.trim())
+              try {
+                const e = await api("/entities/albums", "POST", {
+                  name,
+                  space,
+                });
+                await onUploaded();
+                setAlbum(e.id);
+              } catch (e) {
+                setError((e as Error).message);
+              }
+          }}
+        >
+          <Plus size={16} />
+          Создать альбом
+        </button>
+        <label>
+          Место события
+          <Select
+            aria-label="Место события"
+            value={uploadPlace}
+            disabled={saving || queue.length > 0}
+            onChange={(e) => setUploadPlace(e.target.value)}
+          >
+            <option value="">
+              {state.entities.find((e) => e.id === album)?.place
+                ? "Как в альбоме"
+                : "Не указано"}
+            </option>
+            {state.entities
+              .filter((e) => e.kind === "places" && e.space === space)
+              .map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+            <option value="new">Вписать новое место…</option>
+          </Select>
+        </label>
+        {uploadPlace === "new" && (
+          <label>
+            Название нового места
+            <input
+              value={placeName}
+              onChange={(e) => setPlaceName(e.target.value)}
+              maxLength={120}
+              disabled={queue.length > 0}
+              placeholder="Например, Сочи · пляж Ривьера"
+            />
+          </label>
+        )}
+        <label>
+          Теги
+          <Select
+            aria-label="Теги"
+            multiple
+            value={tags}
+            disabled={saving || queue.length > 0}
+            onChange={(e) =>
+              setTags(e.target.selectedOptions.map((o) => o.value))
+            }
+          >
+            {state.entities
+              .filter(
+                (e) =>
+                  e.kind === "tags" &&
+                  e.owner === state.user?.id &&
+                  e.space === space,
+              )
+              .map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+          </Select>
+        </label>
+      </div>
       <div
         className={"drop-zone " + (dragging ? "dragging" : "")}
         onDragOver={(e) => {
@@ -2074,7 +2289,7 @@ function UploadModal({
         <button
           className="primary"
           onClick={() => input.current?.click()}
-          disabled={saving}
+          disabled={saving || (uploadPlace === "new" && !placeName.trim())}
         >
           <Plus size={18} />
           Выбрать файлы
@@ -2183,78 +2398,6 @@ function UploadModal({
           </div>
         </>
       )}
-      <div className="upload-destination">
-        <h3>Соберите их вместе</h3>
-        <label>
-          Альбом
-          <Select
-            aria-label="Альбом"
-            value={album}
-            disabled={saving}
-            onChange={(e) => setAlbum(e.target.value)}
-          >
-            <option value="">Без альбома</option>
-            {state.entities
-              .filter(
-                (e) =>
-                  e.kind === "albums" &&
-                  e.owner === state.user?.id &&
-                  e.space === space,
-              )
-              .map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.name}
-                </option>
-              ))}
-          </Select>
-        </label>
-        <button
-          className="text-button"
-          disabled={saving}
-          onClick={async () => {
-            const name = await prompt("Как назовём новый альбом?");
-            if (name?.trim())
-              try {
-                const e = await api("/entities/albums", "POST", {
-                  name,
-                  space,
-                });
-                await onUploaded();
-                setAlbum(e.id);
-              } catch (e) {
-                setError((e as Error).message);
-              }
-          }}
-        >
-          <Plus size={16} />
-          Создать альбом
-        </button>
-        <label>
-          Теги
-          <Select
-            aria-label="Теги"
-            multiple
-            value={tags}
-            disabled={saving}
-            onChange={(e) =>
-              setTags(e.target.selectedOptions.map((o) => o.value))
-            }
-          >
-            {state.entities
-              .filter(
-                (e) =>
-                  e.kind === "tags" &&
-                  e.owner === state.user?.id &&
-                  e.space === space,
-              )
-              .map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.name}
-                </option>
-              ))}
-          </Select>
-        </label>
-      </div>
       {error && (
         <p className="error" role="alert">
           {error}
@@ -2266,15 +2409,17 @@ function UploadModal({
             ? "Дождитесь сохранения на сервере"
             : saved
               ? "Сохранено файлов · " + saved
-              : "Файлы останутся в вашем архиве"}
+              : "Можно оставить альбом и место пустыми"}
         </span>
         <button
           className="primary"
-          disabled={pending || saving}
-          onClick={() => void finish()}
+          disabled={
+            pending || saving || (uploadPlace === "new" && !placeName.trim())
+          }
+          onClick={() => (saved ? void finish() : input.current?.click())}
         >
-          <Check size={18} />
-          {saving ? "Сохраняем альбом…" : "Готово"}
+          {saved ? <Check size={18} /> : <Plus size={18} />}
+          {saving ? "Сохраняем альбом…" : saved ? "Готово" : "Выбрать фото"}
         </button>
       </div>
     </ModalFrame>
@@ -2402,7 +2547,9 @@ function Viewer({
     return () => observer.disconnect();
   }, [id]);
   if (!m) return null;
-  const edit = state.user?.id === m.owner;
+  const edit =
+    state.user?.id === m.owner &&
+    state.spaces.find((s) => s.id === m.space)?.role !== "guest";
   const rotated = rotation % 180 !== 0;
   const scale = Math.min(
     frame.width / (rotated ? natural.height : natural.width),
@@ -2694,35 +2841,7 @@ function Viewer({
                     </Select>
                   </label>
                 ))}
-                {m.meta.latitude !== undefined && (
-                  <div className="gps-information">
-                    <small>
-                      GPS {m.meta.latitude.toFixed(4)},{" "}
-                      {m.meta.longitude?.toFixed(4)}
-                    </small>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={async () => {
-                        const name = await prompt("Название места съёмки");
-                        if (name?.trim())
-                          await perform(async () => {
-                            const e = await api("/entities/places", "POST", {
-                              name,
-                              space: m.space,
-                              latitude: m.meta.latitude,
-                              longitude: m.meta.longitude,
-                            });
-                            await api("/media/" + m.id, "PATCH", {
-                              entities: [...m.entities, e.id],
-                            });
-                          });
-                      }}
-                    >
-                      Создать место по GPS
-                    </button>
-                  </div>
-                )}
+
                 <button className="primary">Сохранить</button>
               </form>
             </details>
@@ -2831,6 +2950,7 @@ function FamilyPanel({ state, perform }: { state: State; perform: Perform }) {
   }, []);
   const space = state.spaces.find((s) => s.id === spaceId);
   const members = state.members.filter((m) => m.space === spaceId);
+  const [editing, setEditing] = useState("");
   useEffect(() => {
     setCode("");
     setCopied(false);
@@ -2966,7 +3086,10 @@ function FamilyPanel({ state, perform }: { state: State; perform: Perform }) {
                     <small className="you-label">Вы</small>
                   )}
                 </strong>
-                <small>{m.email}</small>
+                <small>
+                  {m.label ? m.label + " · " : ""}
+                  {m.email}
+                </small>
               </div>
               <span className={"role-badge " + m.role}>
                 {m.role === "owner"
@@ -2977,24 +3100,50 @@ function FamilyPanel({ state, perform }: { state: State; perform: Perform }) {
               </span>
               {m.id !== state.user?.id && space?.role === "owner" && (
                 <button
-                  className="icon danger"
-                  aria-label={"Удалить участника " + m.name}
-                  onClick={async () => {
-                    if (
-                      await confirm("Закрыть доступ участнику " + m.name + "?")
-                    )
-                      await perform(
-                        () => api("/members/" + spaceId + "/" + m.id, "DELETE"),
-                        "Доступ закрыт",
-                      );
-                  }}
+                  className="icon"
+                  aria-label={"Настроить доступ " + m.name}
+                  onClick={() => setEditing(editing === m.id ? "" : m.id)}
                 >
-                  <X size={18} />
+                  <SettingsIcon size={18} />
                 </button>
               )}
             </div>
           ))}
         </div>
+        {members.some((m) => m.id === editing) && (
+          <>
+            <MemberAccess
+              key={editing}
+              member={members.find((m) => m.id === editing)!}
+              albums={state.entities}
+              onCancel={() => setEditing("")}
+              onSave={(b) =>
+                perform(
+                  () => api("/members/" + spaceId + "/" + editing, "PATCH", b),
+                  "Доступ участника сохранён",
+                )
+              }
+            />
+            <button
+              className="danger"
+              onClick={async () => {
+                if (
+                  await confirm("Закрыть доступ к семье для этого участника?")
+                )
+                  if (
+                    await perform(
+                      () =>
+                        api("/members/" + spaceId + "/" + editing, "DELETE"),
+                      "Доступ закрыт",
+                    )
+                  )
+                    setEditing("");
+              }}
+            >
+              Удалить участника из семьи
+            </button>
+          </>
+        )}
       </section>
       <section className="family-section join-section">
         <div className="family-section-title">
@@ -3252,7 +3401,9 @@ function SettingsPage({
   const fallback: Settings = {
     theme: "light",
     visibility: "family",
-    geolocation: true,
+    geolocation: false,
+    desktopNotifications: false,
+    animations: true,
     commentNotifications: true,
     sharedNotifications: true,
   };
@@ -3270,7 +3421,8 @@ function SettingsPage({
     (
       [
         "visibility",
-        "geolocation",
+        "desktopNotifications",
+        "animations",
         "commentNotifications",
         "sharedNotifications",
       ] as const
@@ -3306,10 +3458,18 @@ function SettingsPage({
   const shown = (text: string) =>
     !query || text.toLowerCase().includes(query.toLowerCase());
   const toggle = (
-    key: "geolocation" | "commentNotifications" | "sharedNotifications",
+    key:
+      | "geolocation"
+      | "animations"
+      | "commentNotifications"
+      | "sharedNotifications",
   ) => setDraft((d) => ({ ...d, [key]: !d[key] }));
   const toggleRow = (
-    key: "geolocation" | "commentNotifications" | "sharedNotifications",
+    key:
+      | "geolocation"
+      | "animations"
+      | "commentNotifications"
+      | "sharedNotifications",
     label: string,
     Icon: React.ElementType,
   ) => (
@@ -3329,6 +3489,22 @@ function SettingsPage({
   );
   return (
     <>
+      {!profileMode &&
+        query &&
+        ![
+          "Внешний вид светлая тема тёмная тема",
+          "Приватность доступ альбомы семья участники",
+          "Уведомления комментарии общие альбомы новые фото браузер",
+          "Комфорт просмотра анимации движение",
+          "Хранилище файлы место диск размер резервное копирование экспорт восстановление",
+        ].some(shown) && (
+          <div className="memory-empty">
+            <h3>Настройки не найдены</h3>
+            <p>
+              Попробуйте другой запрос — например, «тема» или «уведомления».
+            </p>
+          </div>
+        )}
       <div className={"settings-grid " + (profileMode ? "profile-grid" : "")}>
         <div>
           {profileMode && shown("Мой профиль имя пароль email аватар") && (
@@ -3403,7 +3579,7 @@ function SettingsPage({
         </div>
         <div>
           {!profileMode &&
-            shown("Приватность альбомы распознавание лиц геолокация") && (
+            shown("Приватность доступ альбомы семья участники") && (
               <section className="settings-card">
                 <h2>
                   <Shield />
@@ -3427,30 +3603,50 @@ function SettingsPage({
                     <option value="invited">По приглашению</option>
                   </Select>
                 </div>
-                <div className="setting-row">
-                  <UserRound size={23} />
-                  <span>Распознавание лиц</span>
-                  <small>Недоступно · ручная разметка</small>
-                </div>
-                {toggleRow("geolocation", "Геолокация фото", MapPin)}
-                <small>
-                  GPS считывается только из новых загрузок. Доступ к
-                  существующим альбомам изменяется в их настройках.
-                </small>
+                <p className="settings-note">
+                  Это правило применяется к новым альбомам. В настройках альбома
+                  можно выбрать конкретных участников, а в профиле — скрыть
+                  альбомы от ребёнка и изменить права членов семьи.
+                </p>
+                <Link to="/profile">
+                  Управлять семьёй <ArrowRight size={16} />
+                </Link>
               </section>
             )}
-          {!profileMode && shown("Уведомления комментарии общие альбомы") && (
+          {!profileMode &&
+            shown(
+              "Уведомления комментарии общие альбомы новые фото браузер",
+            ) && (
+              <section className="settings-card">
+                <h2>
+                  <Bell />
+                  Уведомления
+                </h2>
+                {toggleRow(
+                  "commentNotifications",
+                  "Новые комментарии",
+                  MessageCircle,
+                )}
+                {toggleRow("sharedNotifications", "Новые фото семьи", Share2)}
+                <BrowserNotificationsSetting
+                  enabled={!!draft.desktopNotifications}
+                  onChange={(value) =>
+                    setDraft((d) => ({ ...d, desktopNotifications: value }))
+                  }
+                />
+              </section>
+            )}
+          {!profileMode && shown("Комфорт просмотра анимации движение") && (
             <section className="settings-card">
               <h2>
-                <Bell />
-                Уведомления
+                <Monitor />
+                Комфорт просмотра
               </h2>
-              {toggleRow(
-                "commentNotifications",
-                "Новые комментарии",
-                MessageCircle,
-              )}
-              {toggleRow("sharedNotifications", "Общие альбомы", Share2)}
+              {toggleRow("animations", "Плавные анимации", Sparkles)}
+              <p className="settings-note">
+                Плавное появление окон, карточек и подборок. Если в системе
+                включено уменьшение движения, мы учитываем это автоматически.
+              </p>
             </section>
           )}
         </div>
@@ -3468,7 +3664,9 @@ function SettingsPage({
                   api("/settings", "PATCH", {
                     theme,
                     visibility: draft.visibility,
-                    geolocation: draft.geolocation,
+                    geolocation: false,
+                    animations: draft.animations !== false,
+                    desktopNotifications: !!draft.desktopNotifications,
                     commentNotifications: draft.commentNotifications,
                     sharedNotifications: draft.sharedNotifications,
                   }),
@@ -3482,6 +3680,10 @@ function SettingsPage({
           </button>
         </div>
       )}
+      {!profileMode &&
+        shown(
+          "Хранилище файлы место диск размер резервное копирование экспорт восстановление",
+        ) && <StoragePanel version={state.bytes} />}
       {profileMode && user && (
         <>
           <CoverSettings user={user} state={state} perform={perform} />
@@ -3517,8 +3719,8 @@ function SettingsPage({
               Данные и резервные копии
             </h2>
             <p>
-              Занято {size(state.bytes)}. Резервная копия содержит ваши
-              оригиналы и коллекции. Храните её на другом диске.
+              Резервная копия содержит ваши оригиналы и коллекции. Храните её на
+              другом диске.
             </p>
             <div className="backup-actions">
               <button

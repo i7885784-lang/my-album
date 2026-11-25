@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import ffmpeg from "@ffmpeg-installer/ffmpeg";
+import AdmZip from "adm-zip";
 const storage = fs.mkdtempSync(path.join(os.tmpdir(), "album-test-"));
 const base = "http://127.0.0.1:3199";
 let server: ChildProcess;
@@ -478,5 +479,213 @@ test("invites target the selected family and duplicate joins preserve the invita
       (m: any) => m.space === space && m.id === state.user.id,
     ).length,
     1,
+  );
+});
+
+test("manual places, shared uploads, family restrictions and storage are enforced on the server", async () => {
+  const register = async (name: string) => {
+    const r = await request(
+      "/auth/register",
+      "POST",
+      {
+        name,
+        email: name + Date.now() + "@example.test",
+        password: "testing-password",
+      },
+      "",
+    );
+    assert.equal(r.response.status, 201);
+    return r.response.headers.get("set-cookie")!.split(";")[0];
+  };
+  const parent = await register("parent"),
+    child = await register("child"),
+    outsider = await register("outsider");
+  const parentState = (await request("/state", "GET", undefined, parent)).data;
+  const space = parentState.spaces[0].id,
+    childId = (await request("/me", "GET", undefined, child)).data.id;
+  const a = await request(
+    "/entities/albums",
+    "POST",
+    { name: "Отпуск в Сочи", placeName: "Сочи · Ривьера", space },
+    parent,
+  );
+  assert.equal(a.response.status, 201);
+  const s = (await request("/state", "GET", undefined, parent)).data;
+  const album = s.entities.find((e: any) => e.id === a.data.id),
+    place = s.entities.find((e: any) => e.id === album.place);
+  assert.equal(place.name, "Сочи · Ривьера");
+  const invitation = (
+    await request("/invites", "POST", { space, role: "member" }, parent)
+  ).data.token;
+  assert.equal(
+    (await request("/invites/join", "POST", { token: invitation }, child))
+      .response.status,
+    200,
+  );
+  const upload = async (auth: string, body: Record<string, string>) => {
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob([fs.readFileSync("public/assets/1.jpg")], {
+        type: "image/jpeg",
+      }),
+      "vacation.jpg",
+    );
+    for (const [k, v] of Object.entries(body)) form.append(k, v);
+    const r = await fetch(base + "/api/media/upload", {
+      method: "POST",
+      headers: { Cookie: auth },
+      body: form,
+    });
+    return { status: r.status, data: (await r.json()) as any };
+  };
+  const shared = await upload(child, {
+    space,
+    entities: JSON.stringify([album.id]),
+  });
+  assert.equal(shared.status, 201);
+  const childState = (await request("/state", "GET", undefined, child)).data;
+  assert.ok(
+    childState.media
+      .find((m: any) => m.id === shared.data.id)
+      .entities.includes(place.id),
+  );
+  const overridden = await upload(parent, {
+    space,
+    entities: JSON.stringify([album.id]),
+    placeName: "Адлер",
+  });
+  assert.equal(overridden.status, 201);
+  const before = (await request("/state", "GET", undefined, parent)).data;
+  assert.equal(
+    before.entities.filter((e: any) => e.kind === "places").length,
+    2,
+  );
+  assert.ok(
+    before.media
+      .find((m: any) => m.id === overridden.data.id)
+      .entities.includes(
+        before.entities.find((e: any) => e.name === "Адлер").id,
+      ),
+  );
+  assert.equal(
+    (
+      await request(
+        `/members/${space}/${childId}`,
+        "PATCH",
+        { label: "Ребёнок · Миша", role: "guest", blockedAlbums: [album.id] },
+        outsider,
+      )
+    ).response.status,
+    403,
+  );
+  assert.equal(
+    (
+      await request(
+        `/members/${space}/${childId}`,
+        "PATCH",
+        { label: "Ребёнок · Миша", role: "guest", blockedAlbums: [album.id] },
+        parent,
+      )
+    ).response.status,
+    200,
+  );
+  const restricted = (await request("/state", "GET", undefined, child)).data;
+  assert.ok(!restricted.entities.some((e: any) => e.id === album.id));
+  assert.ok(
+    !restricted.media.some((m: any) =>
+      [shared.data.id, overridden.data.id].includes(m.id),
+    ),
+  );
+  assert.equal(
+    restricted.members.find((m: any) => m.id === childId && m.space === space)
+      .label,
+    "Ребёнок · Миша",
+  );
+  for (const version of ["thumb", "original", "hero"]) {
+    assert.equal(
+      (
+        await fetch(base + `/api/files/${shared.data.id}/${version}`, {
+          headers: { Cookie: child },
+        })
+      ).status,
+      403,
+    );
+  }
+  assert.equal(
+    (
+      await request(
+        `/media/${overridden.data.id}/comments`,
+        "GET",
+        undefined,
+        child,
+      )
+    ).response.status,
+    403,
+  );
+  assert.equal((await upload(child, { space })).status, 403);
+  const notes = (await request("/notifications", "GET", undefined, child)).data
+    .items;
+  assert.ok(!notes.some((n: any) => n.media === overridden.data.id));
+  const exported = await fetch(base + "/api/export", {
+    headers: { Cookie: child },
+  });
+  const zip = new AdmZip(Buffer.from(await exported.arrayBuffer()));
+  const manifest = JSON.parse(
+    zip.getEntry("manifest.json")!.getData().toString(),
+  );
+  assert.ok(!manifest.media.some((m: any) => m.id === shared.data.id));
+  const stats = (await request("/storage", "GET", undefined, parent)).data;
+  assert.ok(
+    stats.originals > 0 &&
+      stats.thumbnails > 0 &&
+      stats.used >= stats.originals &&
+      stats.free >= 0,
+  );
+  assert.equal(
+    (
+      await request(
+        `/members/${space}/${childId}`,
+        "PATCH",
+        { label: "Ребёнок · Миша", role: "member", blockedAlbums: [] },
+        parent,
+      )
+    ).response.status,
+    200,
+  );
+  assert.ok(
+    (await request("/state", "GET", undefined, child)).data.media.some(
+      (m: any) => m.id === shared.data.id,
+    ),
+  );
+  const parentBackup = await fetch(base + "/api/export", {
+    headers: { Cookie: parent },
+  });
+  const restore = new FormData();
+  restore.append(
+    "file",
+    new Blob([await parentBackup.arrayBuffer()]),
+    "family.zip",
+  );
+  assert.equal(
+    (
+      await fetch(base + "/api/restore", {
+        method: "POST",
+        headers: { Cookie: parent },
+        body: restore,
+      })
+    ).status,
+    200,
+  );
+  const restoredState = (await request("/state", "GET", undefined, parent))
+    .data;
+  const restoredAlbum = restoredState.entities.find(
+    (e: any) =>
+      e.kind === "albums" && e.name === album.name && e.id !== album.id,
+  );
+  assert.ok(restoredAlbum && restoredAlbum.place !== place.id);
+  assert.equal(
+    restoredState.entities.find((e: any) => e.id === restoredAlbum.place).name,
+    place.name,
   );
 });

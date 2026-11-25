@@ -10,6 +10,7 @@ export type Entity = {
   created: string;
   visibility: string;
   eventDate?: string;
+  place?: string;
   latitude: number | null;
   longitude: number | null;
   invited: string[];
@@ -40,6 +41,8 @@ export type Settings = {
   theme: "light" | "dark";
   visibility: "private" | "family" | "invited";
   geolocation: boolean;
+  desktopNotifications?: boolean;
+  animations?: boolean;
   commentNotifications: boolean;
   sharedNotifications: boolean;
   avatar?: string;
@@ -63,6 +66,8 @@ export type State = {
     email: string;
     space: string;
     role: string;
+    label?: string;
+    blockedAlbums?: string[];
   }[];
   notifications: {
     id: string;

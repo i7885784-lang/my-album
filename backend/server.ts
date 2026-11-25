@@ -6,6 +6,7 @@ import { fileTypeFromFile } from "file-type";
 import { DatabaseSync } from "node:sqlite";
 import {
   randomBytes,
+  createHash,
   randomUUID,
   scryptSync,
   timingSafeEqual,
@@ -31,6 +32,7 @@ PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,password TEXT NOT NULL,settings TEXT NOT NULL,created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS spaces(id TEXT PRIMARY KEY,name TEXT NOT NULL,owner TEXT NOT NULL REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS members(space TEXT REFERENCES spaces(id),user TEXT REFERENCES users(id),role TEXT NOT NULL,PRIMARY KEY(space,user));
+CREATE TABLE IF NOT EXISTS member_preferences(space TEXT REFERENCES spaces(id),user TEXT REFERENCES users(id),label TEXT NOT NULL DEFAULT '',blockedAlbums TEXT NOT NULL DEFAULT '[]',PRIMARY KEY(space,user));
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user TEXT REFERENCES users(id),expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS entities(id TEXT PRIMARY KEY,space TEXT REFERENCES spaces(id),owner TEXT REFERENCES users(id),kind TEXT NOT NULL,name TEXT NOT NULL,data TEXT NOT NULL,created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY,space TEXT REFERENCES spaces(id),owner TEXT REFERENCES users(id),name TEXT NOT NULL,file TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,width INTEGER,height INTEGER,meta TEXT NOT NULL,created TEXT NOT NULL,deleted TEXT);
@@ -53,13 +55,19 @@ const now = () => new Date().toISOString();
 const defaults = {
   theme: "light",
   visibility: "family",
-  geolocation: true,
+  geolocation: false,
+  desktopNotifications: false,
+  animations: true,
   commentNotifications: true,
   sharedNotifications: true,
   heroImage: "",
   heroPosition: 50,
 };
-const settings = (u: Row) => ({ ...defaults, ...JSON.parse(u.settings) });
+const settings = (u: Row) => ({
+  ...defaults,
+  ...JSON.parse(u.settings),
+  geolocation: false,
+});
 const hash = (password: string) => {
   const salt = randomBytes(16).toString("hex");
   return salt + ":" + scryptSync(password, salt, 64).toString("hex");
@@ -119,8 +127,20 @@ const member = (uid: string, space: string) =>
   one("SELECT * FROM members WHERE user=? AND space=?", uid, space);
 const ownSpace = (uid: string) =>
   one("SELECT * FROM spaces WHERE owner=?", uid)!;
+const memberPreferences = (uid: string, space: string) => {
+  const row = one(
+    "SELECT * FROM member_preferences WHERE user=? AND space=?",
+    uid,
+    space,
+  );
+  return {
+    label: row?.label || "",
+    blockedAlbums: JSON.parse(row?.blockedAlbums || "[]") as string[],
+  };
+};
 const canEntity = (uid: string, e: Row) =>
   member(uid, e.space) &&
+  !memberPreferences(uid, e.space).blockedAlbums.includes(e.id) &&
   (e.kind !== "albums" ||
     e.owner === uid ||
     JSON.parse(e.data).visibility === "family" ||
@@ -130,12 +150,21 @@ const entity = (uid: string, id: string, edit = false) => {
     one("SELECT * FROM entities WHERE id=?", id) ||
     fail(404, "Объект не найден");
   if (!canEntity(uid, e)) fail(403, "Нет доступа");
-  if (edit && e.owner !== uid) fail(403, "Изменять объект может его владелец");
+  if (edit && (e.owner !== uid || member(uid, e.space)?.role === "guest"))
+    fail(403, "Нет права изменять объект");
   return e;
 };
 const canMedia = (uid: string, m: Row) => {
-  if (m.owner === uid) return true;
   if (!member(uid, m.space)) return false;
+  const blocked = memberPreferences(uid, m.space).blockedAlbums;
+  if (
+    blocked.length &&
+    all("SELECT entity FROM links WHERE media=?", m.id).some((l) =>
+      blocked.includes(l.entity),
+    )
+  )
+    return false;
+  if (m.owner === uid) return true;
   const albums = all(
     "SELECT e.* FROM entities e JOIN links l ON l.entity=e.id WHERE l.media=? AND e.kind='albums'",
     m.id,
@@ -149,7 +178,8 @@ const media = (uid: string, id: string, edit = false) => {
   const m =
     one("SELECT * FROM media WHERE id=?", id) || fail(404, "Файл не найден");
   if (!canMedia(uid, m)) fail(403, "Нет доступа");
-  if (edit && m.owner !== uid) fail(403, "Изменять файл может его владелец");
+  if (edit && (m.owner !== uid || member(uid, m.space)?.role === "guest"))
+    fail(403, "Нет права изменять файл");
   return m;
 };
 function notifyShared(
@@ -302,9 +332,19 @@ app.get("/api/state", (req, res) => {
     .map((m) => ({
       ...m,
       meta: JSON.parse(m.meta),
-      entities: all("SELECT entity FROM links WHERE media=?", m.id).map(
-        (l) => l.entity,
-      ),
+      entities: (() => {
+        const links = all(
+          "SELECT e.* FROM entities e JOIN links l ON e.id=l.entity WHERE l.media=?",
+          m.id,
+        ).filter((e) => canEntity(u.id, e));
+        const ids = links.map((e) => e.id);
+        if (!links.some((e) => e.kind === "places"))
+          for (const e of links.filter((e) => e.kind === "albums")) {
+            const place = JSON.parse(e.data).place;
+            if (place && entities.some((e) => e.id === place)) ids.push(place);
+          }
+        return [...new Set(ids)];
+      })(),
       favorite: !!one(
         "SELECT 1 FROM favorites WHERE user=? AND media=?",
         u.id,
@@ -317,14 +357,11 @@ app.get("/api/state", (req, res) => {
     entities,
     media: files,
     bytes: files.reduce((a, m) => a + m.size, 0),
-    notifications: all(
-      "SELECT * FROM notifications WHERE user=? ORDER BY created DESC LIMIT 100",
-      u.id,
-    ),
+    notifications: visibleNotifications(u.id),
     members: all(
       "SELECT u.id,u.name,u.email,m.space,m.role FROM users u JOIN members m ON m.user=u.id WHERE m.space IN (SELECT space FROM members WHERE user=?)",
       u.id,
-    ),
+    ).map((m) => ({ ...m, ...memberPreferences(m.id, m.space) })),
   });
 });
 const kinds = ["albums", "people", "places", "tags"];
@@ -335,22 +372,139 @@ const entityBody = z.object({
   visibility: z.enum(["private", "family", "invited"]).default("family"),
   cover: z.string().max(200).default(""),
   eventDate: z.string().max(32).default(""),
+  place: z.string().max(200).default(""),
+  placeName: z.string().trim().max(120).default(""),
   latitude: z.number().min(-90).max(90).nullable().default(null),
   longitude: z.number().min(-180).max(180).nullable().default(null),
   invited: z.array(z.string()).max(100).default([]),
   space: z.string().optional(),
 });
+function resolvePlace(
+  uid: string,
+  space: string,
+  place: string,
+  placeName: string,
+) {
+  if (place) {
+    const e = entity(uid, place);
+    if (e.kind !== "places" || e.space !== space)
+      fail(400, "Выберите место этой семьи");
+    return e.id as string;
+  }
+  if (!placeName) return "";
+  const existing = all(
+    "SELECT * FROM entities WHERE space=? AND kind='places'",
+    space,
+  ).find((e) => e.name.toLocaleLowerCase() === placeName.toLocaleLowerCase());
+  if (existing) return existing.id as string;
+  const id = randomUUID();
+  run(
+    "INSERT INTO entities VALUES(?,?,?,?,?,?,?)",
+    id,
+    space,
+    uid,
+    "places",
+    placeName,
+    JSON.stringify({
+      category: "Путешествия",
+      description: "",
+      visibility: "family",
+      cover: "",
+      invited: [],
+      latitude: null,
+      longitude: null,
+    }),
+    now(),
+  );
+  return id;
+}
+function visibleNotifications(uid: string) {
+  return all(
+    "SELECT * FROM notifications WHERE user=? ORDER BY created DESC LIMIT 100",
+    uid,
+  ).filter(
+    (n) =>
+      !n.media ||
+      (() => {
+        const m = one("SELECT * FROM media WHERE id=?", n.media);
+        return m && !m.deleted && canMedia(uid, m);
+      })(),
+  );
+}
+app.get("/api/notifications", (req, res) =>
+  res.json({
+    items: visibleNotifications(user(req).id),
+    desktopNotifications: settings(user(req)).desktopNotifications,
+    accessRevision: createHash("sha256")
+      .update(
+        JSON.stringify([
+          all(
+            "SELECT m.space,m.role,p.blockedAlbums FROM members m LEFT JOIN member_preferences p ON p.space=m.space AND p.user=m.user WHERE m.user=? ORDER BY m.space",
+            user(req).id,
+          ),
+          all(
+            "SELECT e.id,e.data FROM entities e JOIN members m ON e.space=m.space WHERE m.user=? AND e.kind='albums' ORDER BY e.id",
+            user(req).id,
+          ),
+        ]),
+      )
+      .digest("hex"),
+  }),
+);
+app.get("/api/storage", (req, res) => {
+  const uid = user(req).id,
+    files = all("SELECT * FROM media WHERE owner=?", uid);
+  const bytesAt = (dir: string, name: string) => {
+    try {
+      return fs.statSync(path.join(store, dir, name)).size;
+    } catch {
+      return 0;
+    }
+  };
+  const originals = files.reduce((n, f) => n + f.size, 0);
+  const thumbnails = files.reduce(
+    (n, f) => n + bytesAt("thumbnails", f.id + ".webp"),
+    0,
+  );
+  const previews = files.reduce(
+    (n, f) =>
+      n +
+      bytesAt("previews", f.id + ".mp4") +
+      bytesAt("previews", f.id + "-hero.webp"),
+    0,
+  );
+  const disk = fs.statfsSync(store);
+  res.json({
+    originals,
+    thumbnails,
+    previews,
+    used: originals + thumbnails + previews,
+    free: disk.bavail * disk.bsize,
+    total: disk.blocks * disk.bsize,
+    photos: files.filter((f) => !f.deleted && f.mime.startsWith("image"))
+      .length,
+    videos: files.filter((f) => !f.deleted && f.mime.startsWith("video"))
+      .length,
+    trash: files.filter((f) => f.deleted).reduce((n, f) => n + f.size, 0),
+  });
+});
 app.post("/api/entities/:kind", (req, res) => {
   const u = user(req),
     kind = String(req.params.kind);
   if (!kinds.includes(kind)) fail(400, "Неизвестный тип");
-  const b = entityBody.parse(req.body),
+  const b = entityBody.parse({
+      visibility: settings(u).visibility,
+      ...req.body,
+    }),
     space = b.space || ownSpace(u.id).id,
     m = member(u.id, space);
   if (!m || m.role === "guest") fail(403, "Нет права создавать объекты");
   if (b.cover && !b.cover.startsWith("/assets/")) {
     media(u.id, b.cover);
   }
+  if (kind === "albums")
+    b.place = resolvePlace(u.id, space, b.place, b.placeName);
+  b.placeName = "";
   const id = randomUUID();
   run(
     "INSERT INTO entities VALUES(?,?,?,?,?,?,?)",
@@ -369,6 +523,9 @@ app.patch("/api/entities/:id", (req, res) => {
     e = entity(u.id, String(req.params.id), true),
     b = entityBody.parse({ ...JSON.parse(e.data), ...req.body });
   if (b.cover && !b.cover.startsWith("/assets/")) media(u.id, b.cover);
+  if (e.kind === "albums")
+    b.place = resolvePlace(u.id, e.space, b.place, b.placeName);
+  b.placeName = "";
   run(
     "UPDATE entities SET name=?,data=? WHERE id=?",
     b.name,
@@ -389,6 +546,10 @@ app.delete("/api/entities/:id", (req, res) => {
         if (m.owner === u.id)
           run("UPDATE media SET deleted=? WHERE id=?", now(), m.id);
       }
+    run(
+      "UPDATE entities SET data=json_set(data,'$.place','') WHERE json_extract(data,'$.place')=?",
+      e.id,
+    );
     run("DELETE FROM entities WHERE id=?", e.id);
   });
   res.json({ ok: true });
@@ -572,7 +733,27 @@ app.post("/api/media/upload", upload.single("file"), async (req, res, next) => {
       access = member(u.id, space);
     if (!access || access.role === "guest")
       fail(403, "Нет права загружать файлы");
-    if (linked.some((e) => e.space !== space || e.owner !== u.id))
+    const placeId = resolvePlace(
+      u.id,
+      space,
+      z
+        .string()
+        .max(200)
+        .parse(req.body.place || ""),
+      z
+        .string()
+        .trim()
+        .max(120)
+        .parse(req.body.placeName || ""),
+    );
+    if (placeId) linked.push(entity(u.id, placeId));
+    if (
+      linked.some(
+        (e) =>
+          e.space !== space ||
+          (!["places", "albums"].includes(e.kind) && e.owner !== u.id),
+      )
+    )
       fail(403, "Выберите собственные объекты одного пространства");
     const id = randomUUID(),
       file = id + "." + detected.ext;
@@ -590,14 +771,6 @@ app.post("/api/media/upload", upload.single("file"), async (req, res, next) => {
       if (exif) {
         if (exif.DateTimeOriginal)
           meta.taken = exif.DateTimeOriginal.toISOString();
-        if (
-          settings(u).geolocation &&
-          Number.isFinite(exif.latitude) &&
-          Number.isFinite(exif.longitude)
-        ) {
-          meta.latitude = exif.latitude;
-          meta.longitude = exif.longitude;
-        }
       }
     }
     if (detected.mime.startsWith("video/"))
@@ -680,9 +853,28 @@ app.patch("/api/media/:id", (req, res) => {
             (l) => l.entity,
           ),
       );
+    if (req.body.place || req.body.placeName) {
+      const placeId = resolvePlace(
+        u.id,
+        m.space,
+        z
+          .string()
+          .max(200)
+          .parse(req.body.place || ""),
+        z
+          .string()
+          .trim()
+          .max(120)
+          .parse(req.body.placeName || ""),
+      );
+      if (placeId && !ids.includes(placeId)) ids.push(placeId);
+    }
     ids.forEach((id) => {
       const e = entity(u.id, id);
-      if (e.space !== m.space || e.owner !== u.id)
+      if (
+        e.space !== m.space ||
+        (!["places", "albums"].includes(e.kind) && e.owner !== u.id)
+      )
         fail(403, "Нет права изменять связи");
     });
     transaction(() => {
@@ -862,6 +1054,8 @@ app.patch("/api/settings", (req, res) => {
       theme: z.enum(["light", "dark"]),
       visibility: z.enum(["private", "family", "invited"]),
       geolocation: z.boolean(),
+      desktopNotifications: z.boolean(),
+      animations: z.boolean(),
       commentNotifications: z.boolean(),
       sharedNotifications: z.boolean(),
       avatar: z.string().max(200).optional(),
@@ -910,11 +1104,59 @@ app.post("/api/invites/join", (req, res) => {
   });
   res.json({ ok: true, space: i.space });
 });
+app.patch("/api/members/:space/:id", (req, res) => {
+  const u = user(req),
+    space = String(req.params.space),
+    id = String(req.params.id);
+  const family = one(
+    "SELECT * FROM spaces WHERE id=? AND owner=?",
+    space,
+    u.id,
+  );
+  if (!family || id === u.id || !member(id, space))
+    fail(403, "Изменять доступ может владелец семьи");
+  const b = z
+    .object({
+      label: z.string().trim().max(80),
+      role: z.enum(["member", "guest"]),
+      blockedAlbums: z.array(z.string()).max(500),
+    })
+    .parse(req.body);
+  for (const album of b.blockedAlbums) {
+    const e = one(
+      "SELECT * FROM entities WHERE id=? AND space=? AND kind='albums'",
+      album,
+      space,
+    );
+    if (!e) fail(400, "Альбом не найден в этой семье");
+  }
+  transaction(() => {
+    run(
+      "UPDATE members SET role=? WHERE space=? AND user=?",
+      b.role,
+      space,
+      id,
+    );
+    run(
+      "INSERT INTO member_preferences VALUES(?,?,?,?) ON CONFLICT(space,user) DO UPDATE SET label=excluded.label,blockedAlbums=excluded.blockedAlbums",
+      space,
+      id,
+      b.label,
+      JSON.stringify(b.blockedAlbums),
+    );
+  });
+  res.json({ ok: true });
+});
 app.delete("/api/members/:space/:id", (req, res) => {
   const u = user(req),
     s = one("SELECT * FROM spaces WHERE id=?", String(req.params.space));
   if (!s || s.owner !== u.id || req.params.id === u.id)
     fail(403, "Нет права удалить участника");
+  run(
+    "DELETE FROM member_preferences WHERE space=? AND user=?",
+    s.id,
+    String(req.params.id),
+  );
   run(
     "DELETE FROM members WHERE space=? AND user=?",
     s.id,
@@ -924,8 +1166,12 @@ app.delete("/api/members/:space/:id", (req, res) => {
 });
 app.get("/api/export", (req, res) => {
   const uid = user(req).id,
-    files = all("SELECT * FROM media WHERE owner=?", uid),
-    entities = all("SELECT * FROM entities WHERE owner=?", uid);
+    files = all("SELECT * FROM media WHERE owner=?", uid).filter((m) =>
+      canMedia(uid, m),
+    ),
+    entities = all("SELECT * FROM entities WHERE owner=?", uid).filter((e) =>
+      canEntity(uid, e),
+    );
   const manifest = {
     version: 1,
     entities,
@@ -1034,6 +1280,7 @@ app.post("/api/restore", upload.single("file"), async (req, res, next) => {
         const b = {
           ...e.body,
           cover: mappings.get(e.body.cover) || "",
+          place: mappings.get(e.body.place) || "",
           space,
           invited: [],
         };
