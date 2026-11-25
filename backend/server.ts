@@ -56,6 +56,8 @@ const defaults = {
   geolocation: true,
   commentNotifications: true,
   sharedNotifications: true,
+  heroImage: "",
+  heroPosition: 50,
 };
 const settings = (u: Row) => ({ ...defaults, ...JSON.parse(u.settings) });
 const hash = (password: string) => {
@@ -283,7 +285,7 @@ app.use("/api", (req, res, next) => {
 app.get("/api/state", (req, res) => {
   const u = user(req),
     spaces = all(
-      "SELECT s.*,m.role FROM spaces s JOIN members m ON m.space=s.id WHERE m.user=?",
+      "SELECT s.*,m.role,u.name AS ownerName FROM spaces s JOIN members m ON m.space=s.id JOIN users u ON u.id=s.owner WHERE m.user=?",
       u.id,
     );
   const entities = all(
@@ -509,6 +511,14 @@ function cleanExpiredTrash() {
         "UPDATE users SET settings=json_remove(settings, '$.avatar') WHERE json_extract(settings, '$.avatar')=?",
         m.id,
       );
+      run(
+        "UPDATE users SET settings=json_remove(settings,'$.heroImage') WHERE json_extract(settings,'$.heroImage')=?",
+        m.id,
+      );
+      run(
+        "UPDATE entities SET data=json_set(data,'$.cover','') WHERE json_extract(data,'$.cover')=?",
+        m.id,
+      );
       run("DELETE FROM media WHERE id=?", m.id);
     }
   });
@@ -517,6 +527,7 @@ function cleanExpiredTrash() {
       ["originals", m.file],
       ["thumbnails", m.id + ".webp"],
       ["previews", m.id + ".mp4"],
+      ["previews", m.id + "-hero.webp"],
     ])
       fs.rmSync(path.join(store, folder, file), { force: true });
   }
@@ -625,6 +636,7 @@ app.get("/api/files/:id/:version", (req, res) => {
     m = media(u.id, String(req.params.id));
   if (m.deleted && m.owner !== u.id) fail(403, "Файл в корзине");
   const thumb = req.params.version === "thumb";
+  const hero = req.params.version === "hero";
   const preview =
     req.params.version === "preview" && m.mime.startsWith("video/");
   if (req.query.download === "1") res.attachment(m.name);
@@ -632,8 +644,14 @@ app.get("/api/files/:id/:version", (req, res) => {
   res.sendFile(
     path.join(
       store,
-      thumb ? "thumbnails" : preview ? "previews" : "originals",
-      thumb ? m.id + ".webp" : preview ? m.id + ".mp4" : m.file,
+      thumb ? "thumbnails" : preview || hero ? "previews" : "originals",
+      thumb
+        ? m.id + ".webp"
+        : hero
+          ? m.id + "-hero.webp"
+          : preview
+            ? m.id + ".mp4"
+            : m.file,
     ),
   );
 });
@@ -709,6 +727,14 @@ app.post("/api/media/batch", (req, res) => {
           "UPDATE users SET settings=json_remove(settings, '$.avatar') WHERE json_extract(settings, '$.avatar')=?",
           m.id,
         );
+        run(
+          "UPDATE users SET settings=json_remove(settings,'$.heroImage') WHERE json_extract(settings,'$.heroImage')=?",
+          m.id,
+        );
+        run(
+          "UPDATE entities SET data=json_set(data,'$.cover','') WHERE json_extract(data,'$.cover')=?",
+          m.id,
+        );
         run("DELETE FROM media WHERE id=?", m.id);
       }
     }
@@ -717,6 +743,9 @@ app.post("/api/media/batch", (req, res) => {
     for (const m of files) {
       fs.rmSync(path.join(store, "originals", m.file), { force: true });
       fs.rmSync(path.join(store, "thumbnails", m.id + ".webp"), {
+        force: true,
+      });
+      fs.rmSync(path.join(store, "previews", m.id + "-hero.webp"), {
         force: true,
       });
       fs.rmSync(path.join(store, "previews", m.id + ".mp4"), { force: true });
@@ -794,6 +823,38 @@ app.patch("/api/profile", (req, res) => {
   if (b.password) session(res, u.id);
   res.json({ ok: true });
 });
+app.patch("/api/profile/appearance", async (req, res) => {
+  const u = user(req);
+  const body = z
+    .object({
+      avatar: z.string().max(200).optional(),
+      heroImage: z.string().max(200).optional(),
+      heroPosition: z.number().min(0).max(100).optional(),
+    })
+    .parse(req.body);
+  for (const field of ["avatar", "heroImage"] as const) {
+    if (!body[field]) continue;
+    const m = media(u.id, body[field]!, true);
+    if (m.deleted || !m.mime.startsWith("image/"))
+      fail(400, "Выберите собственную фотографию из архива");
+    if (field === "heroImage") {
+      const output = path.join(store, "previews", m.id + "-hero.webp");
+      if (!fs.existsSync(output))
+        await createImageThumbnail(
+          path.join(store, "originals", m.file),
+          output,
+          true,
+        );
+    }
+  }
+  const latest = one("SELECT * FROM users WHERE id=?", u.id)!;
+  run(
+    "UPDATE users SET settings=? WHERE id=?",
+    JSON.stringify({ ...settings(latest), ...body }),
+    u.id,
+  );
+  res.json({ ok: true });
+});
 app.patch("/api/settings", (req, res) => {
   const u = user(req);
   const b = z
@@ -804,15 +865,24 @@ app.patch("/api/settings", (req, res) => {
       commentNotifications: z.boolean(),
       sharedNotifications: z.boolean(),
       avatar: z.string().max(200).optional(),
+      heroImage: z.string().max(200).optional(),
+      heroPosition: z.number().min(0).max(100).optional(),
     })
-    .parse(req.body);
+    .parse({ ...settings(u), ...req.body });
   if (b.avatar) media(u.id, b.avatar);
+  if (b.heroImage) media(u.id, b.heroImage);
   run("UPDATE users SET settings=? WHERE id=?", JSON.stringify(b), u.id);
   res.json({ ok: true });
 });
 app.post("/api/invites", (req, res) => {
   const u = user(req),
-    space = ownSpace(u.id),
+    space = req.body.space
+      ? one(
+          "SELECT * FROM spaces WHERE id=? AND owner=?",
+          z.string().parse(req.body.space),
+          u.id,
+        ) || fail(403, "Приглашать может владелец семьи")
+      : ownSpace(u.id),
     role = z.enum(["member", "guest"]).parse(req.body.role || "member"),
     token = randomBytes(24).toString("hex");
   run(
@@ -833,11 +903,12 @@ app.post("/api/invites/join", (req, res) => {
         token,
         Date.now(),
       ) || fail(404, "Приглашение недействительно");
+  if (member(u.id, i.space)) fail(409, "Вы уже состоите в этой семье");
   transaction(() => {
     run("INSERT OR IGNORE INTO members VALUES(?,?,?)", i.space, u.id, i.role);
     run("DELETE FROM invites WHERE token=?", token);
   });
-  res.json({ ok: true });
+  res.json({ ok: true, space: i.space });
 });
 app.delete("/api/members/:space/:id", (req, res) => {
   const u = user(req),

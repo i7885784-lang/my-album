@@ -43,6 +43,8 @@ export type Settings = {
   commentNotifications: boolean;
   sharedNotifications: boolean;
   avatar?: string;
+  heroImage?: string;
+  heroPosition?: number;
 };
 export type User = {
   id: string;
@@ -54,7 +56,7 @@ export type State = {
   user: User | null;
   media: Media[];
   entities: Entity[];
-  spaces: { id: string; name: string; role: string }[];
+  spaces: { id: string; name: string; role: string; ownerName?: string }[];
   members: {
     id: string;
     name: string;

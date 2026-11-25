@@ -1,12 +1,15 @@
 import React, {
   useState,
   useEffect,
+  useLayoutEffect,
   useRef,
   useCallback,
   lazy,
   Suspense,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
+import Landing from "./Landing";
 import {
   BrowserRouter,
   Link,
@@ -33,6 +36,7 @@ import {
   X,
   ChevronRight,
   ChevronLeft,
+  ChevronDown,
   ArrowRight,
   Check,
   Grid2X2,
@@ -63,7 +67,22 @@ import {
 } from "lucide-react";
 import { api, src, size, date } from "./types";
 import type { State, Entity, Media, Settings, User } from "./types";
-import { demo } from "./demo";
+const emptyState: State = {
+  user: null,
+  media: [],
+  entities: [],
+  spaces: [],
+  members: [],
+  notifications: [],
+  bytes: 0,
+};
+import {
+  Select,
+  DateField,
+  DialogProvider,
+  useDialogs,
+  useScrollLock,
+} from "./controls";
 import "./style.css";
 
 const PlacesMap = lazy(() => import("./PlacesMap"));
@@ -94,6 +113,7 @@ const titles: Record<string, string> = {
   trash: "Корзина",
   settings: "Настройки",
   memories: "Воспоминания",
+  profile: "Настройки профиля",
 };
 const descriptions: Record<string, string> = {
   people: "Все близкие в одном месте — находите фото родных быстрее",
@@ -105,6 +125,7 @@ const descriptions: Record<string, string> = {
   photos: "Все важные моменты — всегда рядом",
   videos: "Истории, которые хочется пересматривать",
   favorites: "Моменты, к которым хочется возвращаться",
+  profile: "Личные данные, обложка главной и участники вашей семьи",
 };
 const iconFor: Record<string, React.ElementType> = {
   people: UserRound,
@@ -112,6 +133,7 @@ const iconFor: Record<string, React.ElementType> = {
   tags: Tag,
   settings: SettingsIcon,
   trash: Trash2,
+  profile: UserRound,
 };
 type Modal = { type: string; entity?: Entity; kind?: string };
 function ModalFrame({
@@ -125,6 +147,7 @@ function ModalFrame({
   onClose: () => void;
   wide?: boolean;
 }) {
+  useScrollLock();
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const el = ref.current!;
@@ -135,7 +158,11 @@ function ModalFrame({
     <dialog
       ref={ref}
       className={wide ? "wide" : ""}
-      onCancel={onClose}
+      aria-label={title}
+      onCancel={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
       onClick={(e) => {
         if (e.target === e.currentTarget) {
           const r = e.currentTarget.getBoundingClientRect();
@@ -155,17 +182,18 @@ function ModalFrame({
           <X />
         </button>
       </div>
-      {children}
+      <div className="modal-body">{children}</div>
     </dialog>
   );
 }
 function App() {
+  const { confirm } = useDialogs();
   const location = useLocation(),
     navigate = useNavigate(),
     page = location.pathname.split("/")[1] || "home",
     detailId = location.pathname.split("/")[2];
   const [pageNumber, setPageNumber] = useState(0);
-  const [state, setState] = useState<State>(demo),
+  const [state, setState] = useState<State>(emptyState),
     [loading, setLoading] = useState(true),
     [error, setError] = useState(""),
     [modal, setModal] = useState<Modal | null>(null),
@@ -187,7 +215,7 @@ function App() {
   const refresh = useCallback(async () => {
     try {
       const me = await api("/me");
-      setState(me ? await api("/state") : demo);
+      setState(me ? await api("/state") : emptyState);
       setError("");
     } catch (e) {
       setError((e as Error).message);
@@ -199,11 +227,24 @@ function App() {
     void refresh();
   }, [refresh]);
   useEffect(() => {
-    document.documentElement.dataset.theme =
-      state.user?.settings.theme || "light";
+    let saved = "light";
+    try {
+      saved = localStorage.getItem("album-theme") || "light";
+    } catch {}
+    const theme = state.user?.settings.theme || saved;
+    document.documentElement.dataset.theme = theme;
+    if (state.user)
+      try {
+        localStorage.setItem("album-theme", theme);
+      } catch {}
   }, [state.user?.settings.theme]);
   useEffect(() => {
+    if (!loading && !state.user && location.pathname !== "/")
+      navigate("/", { replace: true });
+  }, [loading, state.user?.id, location.pathname]);
+  useEffect(() => {
     setCategory("");
+    setNotifications(false);
     setSelected([]);
     setMobile(false);
     setQuery("");
@@ -219,6 +260,26 @@ function App() {
       return () => clearTimeout(t);
     }
   }, [toast]);
+  useEffect(() => {
+    if (!notifications) return;
+    const close = (e: PointerEvent) => {
+      if (
+        !(e.target as Element).closest(
+          ".notification-panel,.notification-button",
+        )
+      )
+        setNotifications(false);
+    };
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setNotifications(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [notifications]);
   const requireUser = () => {
     if (!state.user) {
       setModal({ type: "auth" });
@@ -230,6 +291,7 @@ function App() {
     fn: () => Promise<unknown>,
     message = "Изменения сохранены",
   ) => {
+    setToast("");
     try {
       await fn();
       await refresh();
@@ -336,9 +398,9 @@ function App() {
     if (!requireUser() || !ids.length) return;
     if (
       action === "permanent" &&
-      !confirm(
+      !(await confirm(
         "Удалить выбранные файлы навсегда? Восстановить их будет невозможно.",
-      )
+      ))
     )
       return;
     if (
@@ -375,7 +437,12 @@ function App() {
           >
             {m.mime.startsWith("video") ? (
               <>
-                <img src={src(m)} alt={m.name} loading="lazy" />
+                <img
+                  draggable={false}
+                  src={src(m)}
+                  alt={m.name}
+                  loading="lazy"
+                />
                 <span className="video-label">
                   <Video size={15} />{" "}
                   {m.meta.duration
@@ -386,7 +453,7 @@ function App() {
                 </span>
               </>
             ) : (
-              <img src={src(m)} alt={m.name} loading="lazy" />
+              <img draggable={false} src={src(m)} alt={m.name} loading="lazy" />
             )}
           </button>
           <button
@@ -442,7 +509,7 @@ function App() {
         <article className="entity-card" key={e.id}>
           <Link to={"/" + e.kind + "/" + e.id}>
             {cover(e) ? (
-              <img src={cover(e)} alt="" loading="lazy" />
+              <img draggable={false} src={cover(e)} alt="" loading="lazy" />
             ) : (
               <div className="no-cover">
                 <Images />
@@ -475,7 +542,7 @@ function App() {
     <div className="filters">
       <label>
         <Calendar size={18} />
-        <select
+        <Select
           aria-label="Год"
           value={year}
           onChange={(e) => setYear(e.target.value)}
@@ -493,11 +560,11 @@ function App() {
             .map((y) => (
               <option key={y}>{y}</option>
             ))}
-        </select>
+        </Select>
       </label>
       <label>
         <Leaf size={18} />
-        <select
+        <Select
           aria-label="Время года"
           value={season}
           onChange={(e) => setSeason(e.target.value)}
@@ -508,12 +575,12 @@ function App() {
               {s}
             </option>
           ))}
-        </select>
+        </Select>
       </label>
       {["places", "people"].map((kind) => (
         <label key={kind}>
           {kind === "places" ? <MapPin size={18} /> : <UserRound size={18} />}
-          <select
+          <Select
             aria-label={kind === "places" ? "Место" : "Человек"}
             value={kind === "places" ? place : person}
             onChange={(e) =>
@@ -530,7 +597,7 @@ function App() {
                   {e.name}
                 </option>
               ))}
-          </select>
+          </Select>
         </label>
       ))}
       <button
@@ -541,7 +608,7 @@ function App() {
       </button>
       {showFilters && (
         <>
-          <select
+          <Select
             aria-label="Тип файла"
             value={fileType}
             onChange={(e) => setFileType(e.target.value)}
@@ -549,7 +616,7 @@ function App() {
             <option value="">Все файлы</option>
             <option value="image">Фото</option>
             <option value="video">Видео</option>
-          </select>
+          </Select>
           <button
             onClick={() => {
               setYear("");
@@ -565,6 +632,38 @@ function App() {
       )}
     </div>
   );
+  const authenticated = async () => {
+    await refresh();
+    setModal(null);
+    navigate("/");
+  };
+  if (loading)
+    return (
+      <div className="app-loading">
+        <div className="brand-icon">
+          <Images size={30} />
+        </div>
+        <p>Открываем семейные альбомы…</p>
+      </div>
+    );
+  if (!state.user)
+    return (
+      <>
+        <Landing
+          onRegister={() => setModal({ type: "auth", kind: "register" })}
+          onLogin={() => setModal({ type: "auth", kind: "login" })}
+          error={error}
+          onRetry={() => void refresh()}
+        />
+        {modal?.type === "auth" && (
+          <Auth
+            initialRegister={modal.kind !== "login"}
+            onClose={() => setModal(null)}
+            onDone={authenticated}
+          />
+        )}
+      </>
+    );
   return (
     <>
       <aside className={mobile ? "sidebar open" : "sidebar"}>
@@ -599,9 +698,6 @@ function App() {
           <div className="storage">
             <span>Хранилище</span>
             <strong>{size(state.bytes)}</strong>
-            <div className="storage-line">
-              <i />
-            </div>
           </div>
           <Link
             className={
@@ -668,13 +764,15 @@ function App() {
           </button>
           <button
             className="avatar-button"
-            aria-label="Профиль"
+            aria-label="Настройки профиля"
+            title="Настройки профиля"
             onClick={() =>
-              state.user ? navigate("/settings") : setModal({ type: "auth" })
+              state.user ? navigate("/profile") : setModal({ type: "auth" })
             }
           >
             {state.user?.settings.avatar ? (
               <img
+                draggable={false}
                 src={"/api/files/" + state.user.settings.avatar + "/thumb"}
                 alt=""
               />
@@ -759,14 +857,6 @@ function App() {
             </button>
           </section>
         )}
-        {!state.user && !loading && (
-          <div className="demo-notice">
-            Демонстрационный режим · фотографии-примеры{" "}
-            <button onClick={() => setModal({ type: "auth" })}>
-              Создать свой семейный архив <ArrowRight size={14} />
-            </button>
-          </div>
-        )}
         {loading ? (
           <div className="loading">Загружаем семейный архив…</div>
         ) : error ? (
@@ -779,12 +869,16 @@ function App() {
           <>
             <section
               className={
-                "hero " +
-                (page === "home"
-                  ? "home-hero"
-                  : page === "people"
-                    ? "people-hero"
-                    : "")
+                page === "home" ? "hero home-hero" : "hero page-heading"
+              }
+              style={
+                page === "home"
+                  ? ({
+                      "--hero-image": `url("${state.user?.settings.heroImage ? "/api/files/" + state.user.settings.heroImage + "/hero" : "/assets/family-hero.jpg"}")`,
+                      "--hero-position":
+                        (state.user?.settings.heroPosition ?? 50) + "%",
+                    } as React.CSSProperties)
+                  : undefined
               }
             >
               <div className="hero-copy">
@@ -849,9 +943,10 @@ function App() {
               )}
             </section>
             <main>
-              {page === "settings" ? (
+              {page === "settings" || page === "profile" ? (
                 <SettingsPage
                   user={state.user}
+                  profileMode={page === "profile"}
                   query={query}
                   requireUser={requireUser}
                   state={state}
@@ -1063,7 +1158,7 @@ function App() {
                                 Изменить
                               </button>
                             )}
-                          <select
+                          <Select
                             aria-label="Сортировка"
                             value={sort}
                             onChange={(e) => setSort(e.target.value)}
@@ -1073,7 +1168,7 @@ function App() {
                             <option value="name">По названию</option>
                             <option value="size">По размеру</option>
                             <option value="count">По количеству фото</option>
-                          </select>
+                          </Select>
                           <div className="segmented">
                             <button
                               aria-label="Сетка"
@@ -1095,12 +1190,36 @@ function App() {
                       {!detailId &&
                         ["albums", "people", "places", "tags"].includes(page) &&
                         entityCards(entities, page === "albums")}
+                      {["people", "places", "tags"].includes(page) &&
+                        !detailId &&
+                        !entities.length && (
+                          <Empty
+                            title={
+                              query || category
+                                ? "Ничего не найдено"
+                                : page === "people"
+                                  ? "Добавьте близких людей"
+                                  : page === "places"
+                                    ? "Где живут ваши воспоминания?"
+                                    : "Соберите моменты по тегам"
+                            }
+                            text={
+                              query || category
+                                ? "Попробуйте другой запрос или категорию."
+                                : "Создайте первую запись и свяжите её с фотографиями."
+                            }
+                            action={() => openCreate(page)}
+                            label={
+                              page === "people"
+                                ? "Создать запись человека"
+                                : page === "places"
+                                  ? "Создать запись места"
+                                  : "Добавить первый тег"
+                            }
+                          />
+                        )}
                       {page === "places" && !detailId && (
                         <>
-                          <div className="section-heading">
-                            <h2>Карта воспоминаний</h2>
-                            <span>Только места с координатами</span>
-                          </div>
                           <Suspense
                             fallback={
                               <div className="places-map">Загружаем карту…</div>
@@ -1108,6 +1227,7 @@ function App() {
                           >
                             <PlacesMap
                               entities={entities}
+                              media={live}
                               navigate={navigate}
                             />
                           </Suspense>
@@ -1174,7 +1294,7 @@ function App() {
                                   </>
                                 ) : (
                                   <>
-                                    <select
+                                    <Select
                                       aria-label="Добавить выбранное в коллекцию"
                                       value=""
                                       onChange={(e) =>
@@ -1197,7 +1317,7 @@ function App() {
                                             {e.name}
                                           </option>
                                         ))}
-                                    </select>
+                                    </Select>
                                     {currentEntity && (
                                       <button
                                         onClick={() =>
@@ -1361,13 +1481,24 @@ function App() {
           onTrash={(id) => batch("trash", [id])}
         />
       )}
-      {toast && (
-        <div className="toast" role="status">
-          <Check size={18} />
-          {toast}
-        </div>
-      )}
+      {toast && <Toast message={toast} />}
     </>
+  );
+}
+function Toast({ message }: { message: string }) {
+  const [container, setContainer] = useState<Element>(document.body);
+  useLayoutEffect(() => {
+    setContainer(
+      Array.from(document.querySelectorAll("dialog[open]")).at(-1) ||
+        document.body,
+    );
+  });
+  return createPortal(
+    <div className="toast" role="status">
+      <Check size={18} />
+      {message}
+    </div>,
+    container,
   );
 }
 function Empty({
@@ -1398,11 +1529,13 @@ function Empty({
 function Auth({
   onClose,
   onDone,
+  initialRegister = true,
 }: {
   onClose: () => void;
   onDone: () => Promise<void>;
+  initialRegister?: boolean;
 }) {
-  const [register, setRegister] = useState(true),
+  const [register, setRegister] = useState(initialRegister),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   return (
@@ -1415,6 +1548,7 @@ function Auth({
         близких.
       </p>
       <form
+        noValidate
         onSubmit={async (e) => {
           e.preventDefault();
           setBusy(true);
@@ -1489,6 +1623,7 @@ function EntityForm({
   onSave: (b: unknown) => Promise<void>;
   onDelete: (trash: boolean) => Promise<void>;
 }) {
+  const { confirm } = useDialogs();
   const [busy, setBusy] = useState(false);
   return (
     <ModalFrame
@@ -1502,6 +1637,7 @@ function EntityForm({
       onClose={onClose}
     >
       <form
+        noValidate
         onSubmit={async (e) => {
           e.preventDefault();
           setBusy(true);
@@ -1536,19 +1672,28 @@ function EntityForm({
         {categories[kind] && (
           <label>
             Категория
-            <select
+            <Select
               name="category"
               defaultValue={entity?.category || categories[kind][1]}
             >
               {categories[kind].slice(1).map((c) => (
                 <option key={c}>{c}</option>
               ))}
-            </select>
+            </Select>
           </label>
         )}
         <label>
           Обложка / аватар
-          <select name="cover" defaultValue={entity?.cover || ""}>
+          <Select
+            name="cover"
+            defaultValue={
+              entity?.cover &&
+              (entity.cover.startsWith("/assets/") ||
+                state.media.some((m) => m.id === entity.cover && !m.deleted))
+                ? entity.cover
+                : ""
+            }
+          >
             <option value="">Автоматически по фото</option>
             {state.media
               .filter(
@@ -1562,21 +1707,17 @@ function EntityForm({
                   {m.name}
                 </option>
               ))}
-          </select>
+          </Select>
         </label>
         {kind === "albums" && (
           <>
             <label>
               Дата события
-              <input
-                name="eventDate"
-                type="date"
-                defaultValue={entity?.eventDate}
-              />
+              <DateField name="eventDate" defaultValue={entity?.eventDate} />
             </label>
             <label>
               Доступ
-              <select
+              <Select
                 name="visibility"
                 defaultValue={
                   entity?.visibility ||
@@ -1587,11 +1728,11 @@ function EntityForm({
                 <option value="private">Только я</option>
                 <option value="family">Только семья</option>
                 <option value="invited">Выбранные участники</option>
-              </select>
+              </Select>
             </label>
             <label>
               Участники по приглашению
-              <select
+              <Select
                 name="invited"
                 multiple
                 defaultValue={entity?.invited || []}
@@ -1607,7 +1748,7 @@ function EntityForm({
                       {m.name}
                     </option>
                   ))}
-              </select>
+              </Select>
               <small>Выбор применяется к режиму «Выбранные участники»</small>
             </label>
           </>
@@ -1643,13 +1784,13 @@ function EntityForm({
             <button
               type="button"
               className="danger"
-              onClick={() => {
-                if (confirm("Удалить коллекцию?"))
-                  void onDelete(
+              onClick={async () => {
+                if (await confirm("Удалить коллекцию?"))
+                  await onDelete(
                     kind === "albums" &&
-                      confirm(
+                      (await confirm(
                         "Также переместить её фотографии в корзину? Отмена сохранит фотографии в медиатеке.",
-                      ),
+                      )),
                   );
               }}
             >
@@ -1670,9 +1811,9 @@ function EntityForm({
 type QueueFile = {
   id: string;
   file: File;
-  url: string;
   progress: number;
-  status: "ready" | "uploading" | "done" | "error";
+  status: "waiting" | "sending" | "processing" | "saved" | "error";
+  serverId?: string;
   error?: string;
 };
 function UploadModal({
@@ -1686,27 +1827,45 @@ function UploadModal({
   onClose: () => void;
   onUploaded: () => Promise<void>;
 }) {
+  const { confirm, prompt } = useDialogs();
+  const initial = state.entities.find(
+    (e) => e.id === initialEntity && e.owner === state.user?.id,
+  );
+  const space =
+    initial?.space || state.spaces.find((s) => s.role === "owner")?.id;
   const [queue, setQueue] = useState<QueueFile[]>([]),
-    [album, setAlbum] = useState(initialEntity || ""),
-    [tags, setTags] = useState<string[]>([]),
+    [album, setAlbum] = useState(initial?.kind === "albums" ? initial.id : ""),
+    [tags, setTags] = useState<string[]>(
+      initial?.kind === "tags" ? [initial.id] : [],
+    ),
     [busy, setBusy] = useState(false),
+    [saving, setSaving] = useState(false),
     [error, setError] = useState(""),
-    [maxBytes, setMaxBytes] = useState(200 * 1024 ** 2);
+    [maxBytes, setMaxBytes] = useState(200 * 1024 ** 2),
+    [dragging, setDragging] = useState(false);
   const input = useRef<HTMLInputElement>(null),
-    urls = useRef<string[]>([]),
-    request = useRef<XMLHttpRequest | null>(null);
+    request = useRef<XMLHttpRequest | null>(null),
+    active = useRef(false),
+    mounted = useRef(true);
   useEffect(() => {
-    void api("/config").then((c) => setMaxBytes(c.maxFileBytes));
+    void api("/config")
+      .then((c) => setMaxBytes(c.maxFileBytes))
+      .catch((e) => setError(e.message));
     return () => {
-      urls.current.forEach(URL.revokeObjectURL);
+      mounted.current = false;
       request.current?.abort();
     };
   }, []);
+  const update = (id: string, b: Partial<QueueFile>) => {
+    if (mounted.current)
+      setQueue((q) => q.map((f) => (f.id === id ? { ...f, ...b } : f)));
+  };
   const add = (files: FileList | File[]) => {
+    setError("");
     const accepted: QueueFile[] = [];
     for (const file of Array.from(files)) {
       if (file.size > maxBytes) {
-        setError(file.name + ": превышен лимит " + size(maxBytes));
+        setError(file.name + ": больше " + size(maxBytes));
         continue;
       }
       if (
@@ -1722,30 +1881,27 @@ function UploadModal({
         setError(file.name + ": неподдерживаемый формат");
         continue;
       }
-      const url = URL.createObjectURL(file);
-      urls.current.push(url);
       accepted.push({
         id: crypto.randomUUID(),
         file,
-        url,
         progress: 0,
-        status: "ready",
+        status: "waiting",
       });
     }
     setQueue((q) => [...q, ...accepted].slice(0, 20));
   };
-  const update = (id: string, b: Partial<QueueFile>) =>
-    setQueue((q) => q.map((f) => (f.id === id ? { ...f, ...b } : f)));
-  const submit = async () => {
+  useEffect(() => {
+    const entry = queue.find((f) => f.status === "waiting");
+    if (!entry || active.current || !mounted.current) return;
+    active.current = true;
     setBusy(true);
-    setError("");
-    for (const entry of queue.filter((q) => q.status !== "done")) {
-      update(entry.id, { status: "uploading", progress: 0 });
-      const data = new FormData();
-      data.append("file", entry.file);
-      data.append("entities", JSON.stringify([album, ...tags].filter(Boolean)));
+    const send = async () => {
+      update(entry.id, { status: "sending", error: undefined });
+      const form = new FormData();
+      form.append("file", entry.file);
+      if (space) form.append("space", space);
       try {
-        await new Promise<void>((resolve, reject) => {
+        const id = await new Promise<string>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           request.current = xhr;
           xhr.open("POST", "/api/media/upload");
@@ -1753,58 +1909,103 @@ function UploadModal({
             if (e.lengthComputable)
               update(entry.id, {
                 progress: Math.round((e.loaded / e.total) * 100),
+                status: e.loaded === e.total ? "processing" : "sending",
               });
           };
           xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) resolve();
-            else {
-              try {
-                reject(new Error(JSON.parse(xhr.responseText).error));
-              } catch {
-                reject(new Error("Ошибка загрузки"));
-              }
+            try {
+              const data = JSON.parse(xhr.responseText);
+              xhr.status >= 200 && xhr.status < 300
+                ? resolve(data.id)
+                : reject(new Error(data.error || "Ошибка загрузки"));
+            } catch {
+              reject(new Error("Сервер вернул непонятный ответ"));
             }
           };
           xhr.onerror = () => reject(new Error("Нет связи с сервером"));
-          xhr.onabort = () => reject(new Error("Загрузка отменена"));
-          xhr.send(data);
+          xhr.onabort = () => reject(new Error("Загрузка прервана"));
+          xhr.send(form);
         });
-        update(entry.id, { status: "done", progress: 100 });
+        await new Promise<void>((resolve) => {
+          const image = new Image();
+          image.onload = () => resolve();
+          image.onerror = () => resolve();
+          image.src = "/api/files/" + id + "/thumb";
+        });
+        update(entry.id, { serverId: id, status: "saved", progress: 100 });
+        if (mounted.current) await onUploaded();
       } catch (e) {
         update(entry.id, { status: "error", error: (e as Error).message });
+      } finally {
+        active.current = false;
+        request.current = null;
+        if (mounted.current) setBusy(false);
       }
+    };
+    void send();
+  }, [queue, busy]);
+  const pending =
+    busy ||
+    queue.some((f) => ["waiting", "sending", "processing"].includes(f.status));
+  const finish = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      const ids = [
+        album,
+        ...tags,
+        initial && !["albums", "tags"].includes(initial.kind) ? initial.id : "",
+      ].filter(Boolean);
+      for (const file of queue.filter((f) => f.status === "saved"))
+        await api("/media/" + file.serverId, "PATCH", { entities: ids });
+      await onUploaded();
+      onClose();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
     }
-    setBusy(false);
-    request.current = null;
-    await onUploaded();
   };
+  const close = async () => {
+    if (pending) {
+      if (
+        await confirm(
+          "Прервать текущую загрузку? Уже сохранённые файлы останутся в архиве.",
+        )
+      )
+        onClose();
+    } else if (queue.some((f) => f.status === "saved")) await finish();
+    else onClose();
+  };
+  const saved = queue.filter((f) => f.status === "saved").length;
   return (
-    <ModalFrame
-      title="Загрузить фото"
-      onClose={() => {
-        if (!busy || confirm("Прервать текущую загрузку?")) onClose();
-      }}
-    >
+    <ModalFrame title="Загрузить фото" onClose={() => void close()}>
+      <p className="upload-intro">
+        Файлы сохраняются сразу после выбора. В архиве появляются готовые
+        фотографии и миниатюры.
+      </p>
       <div
-        className="drop-zone"
-        onDragOver={(e) => e.preventDefault()}
+        className={"drop-zone " + (dragging ? "dragging" : "")}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
         onDrop={(e) => {
           e.preventDefault();
-          if (!busy) add(e.dataTransfer.files);
+          setDragging(false);
+          add(e.dataTransfer.files);
         }}
       >
-        <ImagePlus size={48} />
-        <p>
-          Перетащите фото и видео сюда
-          <br />
-          или нажмите «Выбрать файлы»
-        </p>
+        <ImagePlus size={42} />
+        <h3>Добавьте новое воспоминание</h3>
+        <p>Перетащите фотографии и видео сюда</p>
         <button
           className="primary"
           onClick={() => input.current?.click()}
-          disabled={busy}
+          disabled={saving}
         >
-          <FolderPlus size={18} />
+          <Plus size={18} />
           Выбрать файлы
         </button>
         <small>
@@ -1823,125 +2024,186 @@ function UploadModal({
           }}
         />
       </div>
-      <div className="upload-queue">
-        {queue.map((entry) => (
-          <div className="queue-row" key={entry.id}>
-            {entry.file.type.startsWith("image") ? (
-              <img src={entry.url} alt="" />
-            ) : (
-              <video src={entry.url} />
-            )}
-            <div>
-              <strong>{entry.file.name}</strong>
-              <small>
-                {size(entry.file.size)}{" "}
-                {entry.status === "error" && entry.error}
-              </small>
-            </div>
-            <div className="progress-wrap">
-              <span>
-                {entry.status === "done"
-                  ? "Сохранено"
-                  : entry.status === "uploading"
-                    ? entry.progress + "%"
-                    : entry.status === "error"
-                      ? "Ошибка"
-                      : "Готов к загрузке"}
-              </span>
-              <progress max={100} value={entry.progress} />
-            </div>
-            {entry.status === "done" ? (
-              <Check size={19} />
-            ) : (
+      {queue.length > 0 && (
+        <>
+          <div className="upload-summary">
+            <strong>
+              {pending
+                ? "Сохраняем воспоминания"
+                : saved + " из " + queue.length + " в архиве"}
+            </strong>
+            {queue.some((f) => f.status === "error") && (
               <button
-                className="icon"
-                aria-label={"Убрать " + entry.file.name}
-                disabled={busy}
+                className="text-button"
+                disabled={pending}
                 onClick={() =>
-                  setQueue((q) => q.filter((f) => f.id !== entry.id))
+                  setQueue((q) =>
+                    q.map((f) =>
+                      f.status === "error"
+                        ? { ...f, status: "waiting", progress: 0 }
+                        : f,
+                    ),
+                  )
                 }
               >
-                <X size={18} />
+                <RotateCcw size={15} />
+                Повторить ошибки
               </button>
             )}
           </div>
-        ))}
-      </div>
-      <label>
-        Альбом
-        <select
-          aria-label="Альбом"
-          value={album}
-          disabled={busy}
-          onChange={(e) => setAlbum(e.target.value)}
-        >
-          <option value="">Без альбома</option>
-          {state.entities
-            .filter((e) => e.kind === "albums" && e.owner === state.user?.id)
-            .map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name}
-              </option>
+          <div className="upload-queue">
+            {queue.map((entry) => (
+              <div className={"queue-row " + entry.status} key={entry.id}>
+                <div className="queue-thumbnail">
+                  {entry.serverId ? (
+                    <img
+                      draggable={false}
+                      src={"/api/files/" + entry.serverId + "/thumb"}
+                      alt=""
+                    />
+                  ) : entry.file.type.startsWith("video") ? (
+                    <Video size={23} />
+                  ) : (
+                    <Images size={23} />
+                  )}
+                </div>
+                <div className="queue-details">
+                  <strong>{entry.file.name}</strong>
+                  <small>
+                    {size(entry.file.size)} ·{" "}
+                    {entry.status === "saved"
+                      ? "В архиве"
+                      : entry.status === "processing"
+                        ? "Создаём миниатюру на сервере"
+                        : entry.status === "sending"
+                          ? "Передача " + entry.progress + "%"
+                          : entry.status === "error"
+                            ? entry.error
+                            : "В очереди"}
+                  </small>
+                  {["sending", "processing"].includes(entry.status) && (
+                    <div
+                      className={
+                        "upload-progress " +
+                        (entry.status === "processing" ? "processing" : "")
+                      }
+                    >
+                      <i style={{ width: entry.progress + "%" }} />
+                    </div>
+                  )}
+                </div>
+                {entry.status === "saved" ? (
+                  <Check className="saved-check" size={20} />
+                ) : (
+                  ["waiting", "error"].includes(entry.status) && (
+                    <button
+                      className="icon"
+                      aria-label={"Убрать " + entry.file.name}
+                      onClick={() =>
+                        setQueue((q) => q.filter((f) => f.id !== entry.id))
+                      }
+                    >
+                      <X size={17} />
+                    </button>
+                  )
+                )}
+              </div>
             ))}
-        </select>
-      </label>
-      <button
-        className="text-button"
-        disabled={busy}
-        onClick={async () => {
-          const name = prompt("Название нового альбома");
-          if (name?.trim())
-            try {
-              const e = await api("/entities/albums", "POST", { name });
-              await onUploaded();
-              setAlbum(e.id);
-            } catch (e) {
-              setError((e as Error).message);
-            }
-        }}
-      >
-        <Plus size={16} />
-        Создать альбом
-      </button>
-      <label>
-        Теги
-        <select
-          multiple
-          value={tags}
-          disabled={busy}
-          onChange={(e) =>
-            setTags(Array.from(e.target.selectedOptions, (o) => o.value))
-          }
+          </div>
+        </>
+      )}
+      <div className="upload-destination">
+        <h3>Соберите их вместе</h3>
+        <label>
+          Альбом
+          <Select
+            aria-label="Альбом"
+            value={album}
+            disabled={saving}
+            onChange={(e) => setAlbum(e.target.value)}
+          >
+            <option value="">Без альбома</option>
+            {state.entities
+              .filter(
+                (e) =>
+                  e.kind === "albums" &&
+                  e.owner === state.user?.id &&
+                  e.space === space,
+              )
+              .map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+          </Select>
+        </label>
+        <button
+          className="text-button"
+          disabled={saving}
+          onClick={async () => {
+            const name = await prompt("Как назовём новый альбом?");
+            if (name?.trim())
+              try {
+                const e = await api("/entities/albums", "POST", {
+                  name,
+                  space,
+                });
+                await onUploaded();
+                setAlbum(e.id);
+              } catch (e) {
+                setError((e as Error).message);
+              }
+          }}
         >
-          {state.entities
-            .filter((e) => e.kind === "tags" && e.owner === state.user?.id)
-            .map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name}
-              </option>
-            ))}
-        </select>
-      </label>
-      <p className="error" role="alert">
-        {error}
-      </p>
-      <div className="modal-actions">
-        <button className="secondary" disabled={busy} onClick={onClose}>
-          {queue.length && queue.every((f) => f.status === "done")
-            ? "Готово"
-            : "Закрыть"}
+          <Plus size={16} />
+          Создать альбом
         </button>
+        <label>
+          Теги
+          <Select
+            aria-label="Теги"
+            multiple
+            value={tags}
+            disabled={saving}
+            onChange={(e) =>
+              setTags(e.target.selectedOptions.map((o) => o.value))
+            }
+          >
+            {state.entities
+              .filter(
+                (e) =>
+                  e.kind === "tags" &&
+                  e.owner === state.user?.id &&
+                  e.space === space,
+              )
+              .map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+          </Select>
+        </label>
+      </div>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="modal-actions">
+        <span className="upload-footer-status">
+          {pending
+            ? "Дождитесь сохранения на сервере"
+            : saved
+              ? "Сохранено файлов · " + saved
+              : "Файлы останутся в вашем архиве"}
+        </span>
         <button
           className="primary"
-          disabled={busy || !queue.some((f) => f.status !== "done")}
-          onClick={() => void submit()}
+          disabled={pending || saving}
+          onClick={() => void finish()}
         >
-          <Upload size={18} />
-          {busy
-            ? "Загружаем…"
-            : queue.some((f) => f.status === "error")
-              ? "Повторить загрузку"
-              : "Загрузить"}
+          <Check size={18} />
+          {saving ? "Сохраняем альбом…" : "Готово"}
         </button>
       </div>
     </ModalFrame>
@@ -1970,15 +2232,32 @@ function Viewer({
   perform: Perform;
   onTrash: (id: string) => Promise<void>;
 }) {
+  const { prompt } = useDialogs();
   const m =
-      files.find((m) => m.id === id) || state.media.find((m) => m.id === id),
-    [zoom, setZoom] = useState(1),
+    files.find((m) => m.id === id) || state.media.find((m) => m.id === id);
+  const [zoom, setZoom] = useState(1),
     [rotation, setRotation] = useState(0),
+    [pan, setPan] = useState({ x: 0, y: 0 }),
+    [frame, setFrame] = useState({ width: 800, height: 600 }),
+    [natural, setNatural] = useState({
+      width: m?.width || 800,
+      height: m?.height || 600,
+    }),
+    [ready, setReady] = useState(false),
     [comments, setComments] = useState<
       { id: string; name: string; text: string; created: string }[]
     >([]),
     [comment, setComment] = useState(""),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [posting, setPosting] = useState(false);
+  const frameRef = useRef<HTMLDivElement>(null),
+    drag = useRef<{ x: number; y: number; panX: number; panY: number } | null>(
+      null,
+    );
+  const fit = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
   const move = useCallback(
     (by: number) => {
       const i = files.findIndex((m) => m.id === id);
@@ -1989,24 +2268,80 @@ function Viewer({
   );
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).matches("input,textarea,select")) return;
-      if (e.key === "ArrowRight") move(1);
-      if (e.key === "ArrowLeft") move(-1);
+      if (
+        e.defaultPrevented ||
+        (e.target as HTMLElement).closest(
+          "input,textarea,[role=listbox],.select-control",
+        )
+      )
+        return;
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        move(1);
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        move(-1);
+      }
     };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
   }, [move]);
   useEffect(() => {
-    setZoom(1);
+    fit();
     setRotation(0);
+    setReady(false);
     setComments([]);
-    if (!id.startsWith("demo"))
-      void api("/media/" + id + "/comments")
-        .then(setComments)
-        .catch((e) => setError(e.message));
+    setComment("");
+    setError("");
+    setNatural({ width: m?.width || 800, height: m?.height || 600 });
+    let active = true;
+    void api("/media/" + id + "/comments")
+      .then((data) => {
+        if (active) setComments(data);
+      })
+      .catch((e) => {
+        if (active) setError(e.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [id]);
+  useEffect(() => {
+    const el = frameRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      const style = getComputedStyle(el);
+      setFrame({
+        width: Math.max(
+          10,
+          el.clientWidth -
+            parseFloat(style.paddingLeft) -
+            parseFloat(style.paddingRight),
+        ),
+        height: Math.max(
+          10,
+          el.clientHeight -
+            parseFloat(style.paddingTop) -
+            parseFloat(style.paddingBottom),
+        ),
+      });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [id]);
   if (!m) return null;
   const edit = state.user?.id === m.owner;
+  const rotated = rotation % 180 !== 0;
+  const scale = Math.min(
+    frame.width / (rotated ? natural.height : natural.width),
+    frame.height / (rotated ? natural.width : natural.height),
+  );
+  const imageStyle = {
+    width: natural.width * scale,
+    height: natural.height * scale,
+    transform: `translate(${pan.x}px,${pan.y}px) rotate(${rotation}deg) scale(${zoom})`,
+  };
   return (
     <ModalFrame title={m.name} onClose={onClose} wide>
       <div className="viewer-layout">
@@ -2014,11 +2349,39 @@ function Viewer({
           <button
             className="viewer-prev icon"
             aria-label="Предыдущее фото"
+            disabled={files.length < 2}
             onClick={() => move(-1)}
           >
             <ChevronLeft />
           </button>
-          <div className="viewer-media">
+          <div
+            className={"viewer-media " + (zoom > 1 ? "zoomed" : "")}
+            ref={frameRef}
+            onPointerDown={(e) => {
+              if (zoom <= 1 || m.mime.startsWith("video")) return;
+              e.preventDefault();
+              drag.current = {
+                x: e.clientX,
+                y: e.clientY,
+                panX: pan.x,
+                panY: pan.y,
+              };
+              e.currentTarget.setPointerCapture(e.pointerId);
+            }}
+            onPointerMove={(e) => {
+              if (drag.current)
+                setPan({
+                  x: drag.current.panX + e.clientX - drag.current.x,
+                  y: drag.current.panY + e.clientY - drag.current.y,
+                });
+            }}
+            onPointerUp={() => {
+              drag.current = null;
+            }}
+            onPointerCancel={() => {
+              drag.current = null;
+            }}
+          >
             {m.mime.startsWith("video") ? (
               <video
                 key={m.id}
@@ -2037,18 +2400,47 @@ function Viewer({
                 autoPlay
               />
             ) : (
-              <img
-                src={src(m, false)}
-                alt={m.name}
-                style={{
-                  transform: "scale(" + zoom + ") rotate(" + rotation + "deg)",
-                }}
-              />
+              <>
+                {!ready && (
+                  <img
+                    className="viewer-preview"
+                    draggable={false}
+                    src={src(m)}
+                    alt=""
+                    aria-hidden="true"
+                    style={imageStyle}
+                  />
+                )}
+                <img
+                  className="viewer-original"
+                  draggable={false}
+                  key={m.id}
+                  src={src(m, false)}
+                  alt={m.name}
+                  style={{ ...imageStyle, opacity: ready ? 1 : 0 }}
+                  onLoad={(e) => {
+                    setNatural({
+                      width: e.currentTarget.naturalWidth,
+                      height: e.currentTarget.naturalHeight,
+                    });
+                    setReady(true);
+                  }}
+                  onError={() =>
+                    setError(
+                      "Не удалось загрузить оригинал. Попробуйте открыть фотографию ещё раз.",
+                    )
+                  }
+                />
+                {!ready && (
+                  <span className="original-loading">Загружаем оригинал…</span>
+                )}
+              </>
             )}
           </div>
           <button
             className="viewer-next icon"
             aria-label="Следующее фото"
+            disabled={files.length < 2}
             onClick={() => move(1)}
           >
             <ChevronRight />
@@ -2056,46 +2448,76 @@ function Viewer({
           <div className="viewer-tools">
             <button
               className="icon"
+              title="Увеличить"
               aria-label="Увеличить"
-              onClick={() => setZoom((v) => Math.min(v + 0.25, 3))}
+              disabled={zoom >= 4 || m.mime.startsWith("video")}
+              onClick={() => setZoom((v) => Math.min(v + 0.25, 4))}
             >
               <ZoomIn />
             </button>
             <button
               className="icon"
+              title="Уменьшить"
               aria-label="Уменьшить"
-              onClick={() => setZoom((v) => Math.max(v - 0.25, 0.25))}
+              disabled={zoom <= 0.5 || m.mime.startsWith("video")}
+              onClick={() => {
+                setZoom((v) => Math.max(v - 0.25, 0.5));
+                setPan({ x: 0, y: 0 });
+              }}
             >
               <ZoomOut />
             </button>
             <button
               className="icon"
+              title="Вписать фотографию"
+              aria-label="Вписать фотографию"
+              onClick={fit}
+            >
+              <RotateCcw />
+            </button>
+            <button
+              className="icon"
+              title="Повернуть"
               aria-label="Повернуть"
-              onClick={() => setRotation((v) => v + 90)}
+              disabled={m.mime.startsWith("video")}
+              onClick={() => {
+                setRotation((v) => (v + 90) % 360);
+                fit();
+              }}
             >
               <RotateCw />
             </button>
             <button
               className="icon"
+              title="Полный экран"
               aria-label="Полный экран"
-              onClick={(e) =>
-                void e.currentTarget
-                  .closest(".viewer-stage")
-                  ?.requestFullscreen()
-              }
+              onClick={async (e) => {
+                const stage = e.currentTarget.closest(".viewer-stage");
+                fit();
+                try {
+                  if (document.fullscreenElement)
+                    await document.exitFullscreen();
+                  else await stage?.requestFullscreen();
+                } catch {
+                  setError("Полноэкранный режим недоступен в этом браузере.");
+                }
+              }}
             >
               <Maximize />
             </button>
+            <span className="tool-divider" />
             <a
               className="icon"
+              title="Скачать оригинал"
               aria-label="Скачать оригинал"
-              href={src(m, false) + (m.demoSrc ? "" : "?download=1")}
+              href={src(m, false) + "?download=1"}
               download
             >
               <Download />
             </a>
             <button
               className={"icon " + (m.favorite ? "liked" : "")}
+              title="В избранное"
               aria-label="В избранное"
               aria-pressed={m.favorite}
               onClick={() => {
@@ -2110,6 +2532,7 @@ function Viewer({
             {edit && (
               <button
                 className="icon danger"
+                title="В корзину"
                 aria-label="В корзину"
                 onClick={() => void onTrash(m.id)}
               >
@@ -2119,48 +2542,48 @@ function Viewer({
           </div>
         </div>
         <section className="viewer-info">
-          <h3>О фотографии</h3>
-          <p>
-            {date(m.meta.taken || m.created)}
-            <br />
-            {m.width && m.width + " × " + m.height + " · "}
-            {size(m.size)}
-          </p>
+          <div className="photo-information">
+            <h3>О фотографии</h3>
+            <p>
+              {date(m.meta.taken || m.created)}
+              <span>
+                {m.width && m.width + " × " + m.height + " · "}
+                {size(m.size)}
+              </span>
+            </p>
+          </div>
           {edit && (
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                const data = new FormData(e.currentTarget);
-                await perform(() =>
-                  api("/media/" + m.id, "PATCH", {
-                    name: data.get("name"),
-                    entities: data.getAll("entities"),
-                  }),
-                );
-              }}
-            >
-              <label>
-                Название
-                <input
-                  name="name"
-                  defaultValue={m.name}
-                  key={m.id}
-                  required
-                  maxLength={200}
-                />
-              </label>
-              {["albums", "tags", "people", "places"].map((kind) => (
-                <label key={kind}>
-                  {
+            <details className="photo-edit" key={m.id}>
+              <summary>
+                <Pencil size={16} />
+                Изменить данные фото
+                <ChevronDown size={16} />
+              </summary>
+              <form
+                noValidate
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const data = new FormData(e.currentTarget);
+                  await perform(() =>
+                    api("/media/" + m.id, "PATCH", {
+                      name: data.get("name"),
+                      entities: data.getAll("entities"),
+                    }),
+                  );
+                }}
+              >
+                <label>
+                  Название
+                  <input
+                    name="name"
+                    defaultValue={m.name}
+                    required
+                    maxLength={200}
+                  />
+                </label>
+                {["albums", "tags", "people", "places"].map((kind) => (
+                  <label key={kind}>
                     {
-                      albums: "Альбомы",
-                      tags: "Теги",
-                      people: "Люди",
-                      places: "Места",
-                    }[kind]
-                  }
-                  <select
-                    aria-label={
                       {
                         albums: "Альбомы",
                         tags: "Теги",
@@ -2168,103 +2591,385 @@ function Viewer({
                         places: "Места",
                       }[kind]
                     }
-                    key={m.id + kind + m.entities.join()}
-                    name="entities"
-                    multiple
-                    defaultValue={m.entities.filter(
-                      (id) =>
-                        state.entities.find((e) => e.id === id)?.kind === kind,
-                    )}
-                  >
-                    {state.entities
-                      .filter(
-                        (e) =>
-                          e.kind === kind &&
-                          e.owner === state.user?.id &&
-                          e.space === m.space,
-                      )
-                      .map((e) => (
-                        <option key={e.id} value={e.id}>
-                          {e.name}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              ))}
-              {m.meta.latitude !== undefined && (
-                <div>
-                  <p>
-                    GPS {m.meta.latitude.toFixed(4)},{" "}
-                    {m.meta.longitude?.toFixed(4)}
-                  </p>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={async () => {
-                      const name = prompt("Название места съёмки");
-                      if (name?.trim())
-                        await perform(async () => {
-                          const e = await api("/entities/places", "POST", {
-                            name,
-                            space: m.space,
-                            latitude: m.meta.latitude,
-                            longitude: m.meta.longitude,
+                    <Select
+                      aria-label={
+                        {
+                          albums: "Альбомы",
+                          tags: "Теги",
+                          people: "Люди",
+                          places: "Места",
+                        }[kind]
+                      }
+                      name="entities"
+                      multiple
+                      defaultValue={m.entities.filter(
+                        (id) =>
+                          state.entities.find((e) => e.id === id)?.kind ===
+                          kind,
+                      )}
+                    >
+                      {state.entities
+                        .filter(
+                          (e) =>
+                            e.kind === kind &&
+                            e.owner === state.user?.id &&
+                            e.space === m.space,
+                        )
+                        .map((e) => (
+                          <option key={e.id} value={e.id}>
+                            {e.name}
+                          </option>
+                        ))}
+                    </Select>
+                  </label>
+                ))}
+                {m.meta.latitude !== undefined && (
+                  <div className="gps-information">
+                    <small>
+                      GPS {m.meta.latitude.toFixed(4)},{" "}
+                      {m.meta.longitude?.toFixed(4)}
+                    </small>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={async () => {
+                        const name = await prompt("Название места съёмки");
+                        if (name?.trim())
+                          await perform(async () => {
+                            const e = await api("/entities/places", "POST", {
+                              name,
+                              space: m.space,
+                              latitude: m.meta.latitude,
+                              longitude: m.meta.longitude,
+                            });
+                            await api("/media/" + m.id, "PATCH", {
+                              entities: [...m.entities, e.id],
+                            });
                           });
-                          await api("/media/" + m.id, "PATCH", {
-                            entities: [...m.entities, e.id],
-                          });
-                        });
-                    }}
-                  >
-                    Создать место по GPS
-                  </button>
-                </div>
-              )}
-              <button className="primary">Сохранить</button>
-            </form>
-          )}
-          <h3>Комментарии</h3>
-          {comments.map((c) => (
-            <div className="comment" key={c.id}>
-              <strong>{c.name}</strong>
-              <small>{date(c.created)}</small>
-              <p>{c.text}</p>
-            </div>
-          ))}
-          {state.user &&
-            state.spaces.find((s) => s.id === m.space)?.role !== "guest" && (
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  if (
-                    await perform(
-                      () =>
-                        api("/media/" + m.id + "/comments", "POST", {
-                          text: comment,
-                        }),
-                      "Комментарий добавлен",
-                    )
-                  ) {
-                    setComment("");
-                    setComments(await api("/media/" + m.id + "/comments"));
-                  }
-                }}
-              >
-                <textarea
-                  aria-label="Комментарий"
-                  value={comment}
-                  onChange={(e) => setComment(e.target.value)}
-                  required
-                  maxLength={2000}
-                  placeholder="Добавить комментарий…"
-                />
-                <button className="secondary">Отправить</button>
+                      }}
+                    >
+                      Создать место по GPS
+                    </button>
+                  </div>
+                )}
+                <button className="primary">Сохранить</button>
               </form>
-            )}
-          <p className="error">{error}</p>
+            </details>
+          )}
+          <section className="comments-section">
+            <div className="comments-heading">
+              <h3>Комментарии</h3>
+              <span>{comments.length}</span>
+            </div>
+            <div className="comments-list">
+              {comments.length ? (
+                comments.map((c) => (
+                  <article className="comment" key={c.id}>
+                    <span className="comment-avatar">
+                      {c.name.slice(0, 1).toUpperCase()}
+                    </span>
+                    <div>
+                      <div className="comment-heading">
+                        <strong>{c.name}</strong>
+                        <time>
+                          {new Date(c.created).toLocaleDateString("ru-RU", {
+                            day: "numeric",
+                            month: "short",
+                          })}
+                        </time>
+                      </div>
+                      <p>{c.text}</p>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <p className="comments-empty">
+                  Поделитесь историей этого момента.
+                </p>
+              )}
+            </div>
+            {state.user &&
+              state.spaces.find((s) => s.id === m.space)?.role !== "guest" && (
+                <form
+                  noValidate
+                  className="comment-form"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    setPosting(true);
+                    if (
+                      await perform(
+                        () =>
+                          api("/media/" + m.id + "/comments", "POST", {
+                            text: comment.trim(),
+                          }),
+                        "Комментарий добавлен",
+                      )
+                    ) {
+                      setComment("");
+                      try {
+                        setComments(await api("/media/" + m.id + "/comments"));
+                      } catch (e) {
+                        setError((e as Error).message);
+                      }
+                    }
+                    setPosting(false);
+                  }}
+                >
+                  <textarea
+                    aria-label="Комментарий"
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    required
+                    maxLength={2000}
+                    placeholder="Напишите, что хочется сохранить в памяти…"
+                  />
+                  <button
+                    className="primary"
+                    disabled={!comment.trim() || posting}
+                  >
+                    <MessageCircle size={17} />
+                    {posting ? "Отправляем…" : "Отправить комментарий"}
+                  </button>
+                </form>
+              )}
+          </section>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
         </section>
       </div>
     </ModalFrame>
+  );
+}
+function FamilyPanel({ state, perform }: { state: State; perform: Perform }) {
+  const { confirm } = useDialogs();
+  const [spaceId, setSpaceId] = useState(
+      state.spaces.find((s) => s.role === "owner")?.id ||
+        state.spaces[0]?.id ||
+        "",
+    ),
+    [code, setCode] = useState(""),
+    [role, setRole] = useState("member"),
+    [join, setJoin] = useState(""),
+    [busy, setBusy] = useState(false),
+    [copied, setCopied] = useState(false);
+  useEffect(() => {
+    void perform(async () => {}, "");
+  }, []);
+  const space = state.spaces.find((s) => s.id === spaceId);
+  const members = state.members.filter((m) => m.space === spaceId);
+  useEffect(() => {
+    setCode("");
+    setCopied(false);
+  }, [spaceId]);
+  return (
+    <div className="family-panel">
+      <div className="family-space-selector">
+        <label>
+          Семейное пространство
+          <Select
+            aria-label="Семейное пространство"
+            value={spaceId}
+            onChange={(e) => setSpaceId(e.target.value)}
+          >
+            {state.spaces.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name +
+                  " · " +
+                  (s.role === "owner"
+                    ? "ваша семья"
+                    : s.ownerName || "семья участника")}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <span className="family-count">
+          <Users size={18} />
+          Участники · {members.length}
+        </span>
+      </div>
+      {space?.role === "owner" && (
+        <section className="family-section">
+          <div className="family-section-title">
+            <Share2 size={21} />
+            <div>
+              <h3>Пригласить близких</h3>
+              <p>
+                Код действует 7 дней. Каждый код можно использовать один раз.
+              </p>
+            </div>
+          </div>
+          <div className="invite-create">
+            <label>
+              Роль приглашённого
+              <Select
+                aria-label="Роль приглашённого"
+                value={role}
+                disabled={busy}
+                onChange={(e) => setRole(e.target.value)}
+              >
+                <option value="member">
+                  Участник · просмотр и свои загрузки
+                </option>
+                <option value="guest">Гость · только просмотр</option>
+              </Select>
+            </label>
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                await perform(async () => {
+                  const result = await api("/invites", "POST", {
+                    role,
+                    space: spaceId,
+                  });
+                  setCode(result.token);
+                  setCopied(false);
+                }, "Приглашение создано");
+                setBusy(false);
+              }}
+            >
+              <Plus size={18} />
+              Создать приглашение
+            </button>
+          </div>
+          {code && (
+            <div className="invitation-code">
+              <label>
+                Код приглашения
+                <input
+                  readOnly
+                  value={code}
+                  onFocus={(e) => e.target.select()}
+                />
+              </label>
+              <button
+                className="secondary"
+                onClick={async () => {
+                  try {
+                    if (navigator.clipboard)
+                      await navigator.clipboard.writeText(code);
+                    else {
+                      const input = document.createElement("textarea");
+                      input.value = code;
+                      document.body.append(input);
+                      input.select();
+                      const ok = document.execCommand("copy");
+                      input.remove();
+                      if (!ok) throw new Error();
+                    }
+                    setCopied(true);
+                  } catch {
+                    setCopied(false);
+                  }
+                }}
+              >
+                <Copy size={17} />
+                {copied ? "Скопировано" : "Скопировать"}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+      <section className="family-section">
+        <div className="family-section-title">
+          <Users size={21} />
+          <div>
+            <h3>Участники семьи</h3>
+            <p>Доступ и роли в выбранном пространстве.</p>
+          </div>
+        </div>
+        <div className="members-list">
+          {members.map((m) => (
+            <div className="member-row" key={m.id}>
+              <span className="member-avatar">
+                {m.name.slice(0, 1).toUpperCase()}
+              </span>
+              <div>
+                <strong>
+                  {m.name}
+                  {m.id === state.user?.id && (
+                    <small className="you-label">Вы</small>
+                  )}
+                </strong>
+                <small>{m.email}</small>
+              </div>
+              <span className={"role-badge " + m.role}>
+                {m.role === "owner"
+                  ? "Владелец"
+                  : m.role === "guest"
+                    ? "Гость"
+                    : "Участник"}
+              </span>
+              {m.id !== state.user?.id && space?.role === "owner" && (
+                <button
+                  className="icon danger"
+                  aria-label={"Удалить участника " + m.name}
+                  onClick={async () => {
+                    if (
+                      await confirm("Закрыть доступ участнику " + m.name + "?")
+                    )
+                      await perform(
+                        () => api("/members/" + spaceId + "/" + m.id, "DELETE"),
+                        "Доступ закрыт",
+                      );
+                  }}
+                >
+                  <X size={18} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="family-section join-section">
+        <div className="family-section-title">
+          <FolderHeart size={21} />
+          <div>
+            <h3>Присоединиться к другой семье</h3>
+            <p>Введите код, который вам передал владелец.</p>
+          </div>
+        </div>
+        <form
+          noValidate
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setBusy(true);
+            let joinedSpace = "";
+            if (
+              await perform(async () => {
+                const result = await api("/invites/join", "POST", {
+                  token: join.trim(),
+                });
+                joinedSpace = result.space;
+              }, "Вы присоединились к семье")
+            ) {
+              setJoin("");
+              if (joinedSpace) setSpaceId(joinedSpace);
+            }
+            setBusy(false);
+          }}
+        >
+          <label>
+            Код приглашения
+            <input
+              value={join}
+              onChange={(e) => setJoin(e.target.value)}
+              required
+              placeholder="Вставьте полученный код"
+              autoComplete="off"
+            />
+          </label>
+          <button className="secondary" disabled={busy || !join.trim()}>
+            <ArrowRight size={17} />
+            Присоединиться
+          </button>
+        </form>
+      </section>
+    </div>
   );
 }
 function FamilyModal({
@@ -2276,105 +2981,164 @@ function FamilyModal({
   onClose: () => void;
   perform: Perform;
 }) {
-  const [code, setCode] = useState(""),
-    [role, setRole] = useState("member"),
-    [join, setJoin] = useState("");
   return (
     <ModalFrame title="Семейный доступ" onClose={onClose}>
-      <p>
-        Пригласите близкого человека в своё пространство. Код действует 7 дней и
-        используется один раз.
-      </p>
-      <label>
-        Роль приглашённого
-        <select value={role} onChange={(e) => setRole(e.target.value)}>
-          <option value="member">Участник — просмотр и свои загрузки</option>
-          <option value="guest">Гость — только просмотр</option>
-        </select>
-      </label>
-      <button
-        className="primary"
-        onClick={() =>
-          void perform(async () => {
-            const result = await api("/invites", "POST", { role });
-            setCode(result.token);
-          }, "Приглашение создано")
-        }
-      >
-        Создать приглашение
-      </button>
-      {code && (
-        <label>
-          Код приглашения
-          <input readOnly value={code} />
-          <button
-            className="secondary"
-            onClick={() => void navigator.clipboard.writeText(code)}
-          >
-            <Copy size={16} />
-            Скопировать
-          </button>
-        </label>
-      )}
-      <h3>Присоединиться к семье</h3>
-      <form
-        onSubmit={async (e) => {
-          e.preventDefault();
-          if (
-            await perform(
-              () => api("/invites/join", "POST", { token: join }),
-              "Вы присоединились к семье",
-            )
-          )
-            setJoin("");
+      <FamilyPanel state={state} perform={perform} />
+    </ModalFrame>
+  );
+}
+function CoverSettings({
+  user,
+  state,
+  perform,
+}: {
+  user: User;
+  state: State;
+  perform: Perform;
+}) {
+  const [image, setImage] = useState(user.settings.heroImage || ""),
+    [position, setPosition] = useState(user.settings.heroPosition ?? 50),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  useEffect(() => {
+    setImage(user.settings.heroImage || "");
+    setPosition(user.settings.heroPosition ?? 50);
+  }, [user.settings.heroImage, user.settings.heroPosition]);
+  const dirty =
+    image !== (user.settings.heroImage || "") ||
+    position !== (user.settings.heroPosition ?? 50);
+  const source = image
+    ? "/api/files/" +
+      image +
+      "/" +
+      (image === user.settings.heroImage ? "hero" : "original")
+    : "/assets/family-hero.jpg";
+  return (
+    <section className="settings-card cover-settings">
+      <h2>
+        <Images />
+        Обложка главной
+      </h2>
+      <p>Выберите фотографию и расположите важную часть в кадре.</p>
+      <div
+        className="cover-preview"
+        style={{
+          backgroundImage:
+            'linear-gradient(90deg,var(--hero-shade),transparent),url("' +
+            source +
+            '")',
+          backgroundPosition: "center " + position + "%",
         }}
       >
+        <strong>
+          Сохраняйте
+          <br />
+          семейные воспоминания
+        </strong>
+      </div>
+      <div className="cover-controls">
         <label>
-          Код приглашения
+          Фотография
+          <Select
+            aria-label="Фотография обложки"
+            value={image}
+            disabled={busy}
+            onChange={(e) => setImage(e.target.value)}
+          >
+            <option value="">Стандартная обложка</option>
+            {image && !state.media.some((m) => m.id === image) && (
+              <option value={image}>Новая фотография</option>
+            )}
+            {state.media
+              .filter(
+                (m) =>
+                  m.owner === user.id &&
+                  !m.deleted &&
+                  m.mime.startsWith("image"),
+              )
+              .map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+          </Select>
+        </label>
+        <label className="button secondary">
+          <Upload size={17} />
+          {busy ? "Сохраняем фотографию…" : "Загрузить обложку"}
           <input
-            value={join}
-            onChange={(e) => setJoin(e.target.value)}
-            required
+            type="file"
+            hidden
+            accept="image/jpeg,image/png,image/webp"
+            disabled={busy}
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (!file) return;
+              setBusy(true);
+              setError("");
+              try {
+                const form = new FormData();
+                form.append("file", file);
+                const response = await fetch("/api/media/upload", {
+                  method: "POST",
+                  body: form,
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error);
+                setImage(data.id);
+              } catch (e) {
+                setError((e as Error).message);
+              } finally {
+                setBusy(false);
+              }
+            }}
           />
         </label>
-        <button className="secondary">Присоединиться</button>
-      </form>
-      <h3>Участники</h3>
-      {state.members.map((m) => (
-        <div className="member-row" key={m.id + m.space}>
-          <UserRound size={20} />
-          <div>
-            <strong>{m.name}</strong>
-            <small>
-              {m.role === "owner"
-                ? "Владелец"
-                : m.role === "guest"
-                  ? "Гость"
-                  : "Участник"}
-            </small>
-          </div>
-          {m.id !== state.user?.id &&
-            state.spaces.find((s) => s.id === m.space)?.role === "owner" && (
-              <button
-                className="icon danger"
-                aria-label={"Удалить участника " + m.name}
-                onClick={() => {
-                  if (confirm("Закрыть доступ участнику?"))
-                    void perform(() =>
-                      api("/members/" + m.space + "/" + m.id, "DELETE"),
-                    );
-                }}
-              >
-                <X size={18} />
-              </button>
-            )}
-        </div>
-      ))}
-    </ModalFrame>
+      </div>
+      <label className="cover-position">
+        Положение фотографии
+        <input
+          type="range"
+          aria-label="Положение фотографии"
+          min="0"
+          max="100"
+          value={position}
+          onChange={(e) => setPosition(Number(e.target.value))}
+        />
+      </label>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="cover-save">
+        <button
+          className="primary"
+          disabled={busy || !dirty}
+          onClick={async () => {
+            setBusy(true);
+            await perform(
+              () =>
+                api("/profile/appearance", "PATCH", {
+                  heroImage: image,
+                  heroPosition: position,
+                }),
+              "Обложка сохранена",
+            );
+            setBusy(false);
+          }}
+        >
+          <Check size={18} />
+          Сохранить обложку
+        </button>
+      </div>
+    </section>
   );
 }
 function SettingsPage({
   user,
+  profileMode = false,
   query,
   requireUser,
   state,
@@ -2382,12 +3146,15 @@ function SettingsPage({
   setModal,
 }: {
   user: User | null;
+  profileMode?: boolean;
   query: string;
   requireUser: () => boolean;
   state: State;
   perform: Perform;
   setModal: (m: Modal | null) => void;
 }) {
+  const { confirm } = useDialogs();
+  const navigate = useNavigate();
   const fallback: Settings = {
     theme: "light",
     visibility: "family",
@@ -2403,8 +3170,10 @@ function SettingsPage({
   useEffect(() => {
     setDraft(user?.settings || fallback);
   }, [user?.settings]);
-  const dirty =
-    JSON.stringify(draft) !== JSON.stringify(user?.settings || fallback);
+  const savedSettings = user?.settings || fallback;
+  const dirty = (
+    Object.keys({ ...savedSettings, ...draft }) as (keyof Settings)[]
+  ).some((key) => draft[key] !== savedSettings[key]);
   useEffect(() => {
     document.documentElement.dataset.theme = draft.theme;
     return () => {
@@ -2416,13 +3185,22 @@ function SettingsPage({
     const handler = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener("beforeunload", handler);
     const click = (e: MouseEvent) => {
+      const link = (e.target as HTMLElement).closest(
+        "a[href]",
+      ) as HTMLAnchorElement | null;
       if (
-        (e.target as HTMLElement).closest("a[href]") &&
-        !confirm("Есть несохранённые настройки. Покинуть страницу?")
-      ) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
+        !link ||
+        link.origin !== window.location.origin ||
+        link.pathname === window.location.pathname
+      )
+        return;
+      e.preventDefault();
+      e.stopPropagation();
+      void confirm("Есть несохранённые настройки. Покинуть страницу?").then(
+        (ok) => {
+          if (ok) navigate(link.pathname + link.search + link.hash);
+        },
+      );
     };
     document.addEventListener("click", click, true);
     return () => {
@@ -2456,9 +3234,9 @@ function SettingsPage({
   );
   return (
     <>
-      <div className="settings-grid">
+      <div className={"settings-grid " + (profileMode ? "profile-grid" : "")}>
         <div>
-          {shown("Мой профиль имя пароль email аватар") && (
+          {profileMode && shown("Мой профиль имя пароль email аватар") && (
             <section className="settings-card">
               <h2>
                 <UserRound />
@@ -2468,6 +3246,7 @@ function SettingsPage({
                 <div className="profile-avatar">
                   {draft.avatar ? (
                     <img
+                      draggable={false}
                       src={"/api/files/" + draft.avatar + "/thumb"}
                       alt="Ваш аватар"
                     />
@@ -2491,7 +3270,7 @@ function SettingsPage({
               </div>
             </section>
           )}
-          {shown("Внешний вид светлая тема тёмная тема") && (
+          {!profileMode && shown("Внешний вид светлая тема тёмная тема") && (
             <section className="settings-card">
               <h2>
                 <Monitor />
@@ -2518,42 +3297,44 @@ function SettingsPage({
           )}
         </div>
         <div>
-          {shown("Приватность альбомы распознавание лиц геолокация") && (
-            <section className="settings-card">
-              <h2>
-                <Shield />
-                Приватность
-              </h2>
-              <div className="setting-row">
-                <Users size={23} />
-                <span>Новые альбомы видны</span>
-                <select
-                  value={draft.visibility}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      visibility: e.target.value as Settings["visibility"],
-                    }))
-                  }
-                >
-                  <option value="private">Только мне</option>
-                  <option value="family">Только семье</option>
-                  <option value="invited">По приглашению</option>
-                </select>
-              </div>
-              <div className="setting-row">
-                <UserRound size={23} />
-                <span>Распознавание лиц</span>
-                <small>Недоступно · ручная разметка</small>
-              </div>
-              {toggleRow("geolocation", "Геолокация фото", MapPin)}
-              <small>
-                GPS считывается только из новых загрузок. Доступ к существующим
-                альбомам изменяется в их настройках.
-              </small>
-            </section>
-          )}
-          {shown("Уведомления комментарии общие альбомы") && (
+          {!profileMode &&
+            shown("Приватность альбомы распознавание лиц геолокация") && (
+              <section className="settings-card">
+                <h2>
+                  <Shield />
+                  Приватность
+                </h2>
+                <div className="setting-row">
+                  <Users size={23} />
+                  <span>Новые альбомы видны</span>
+                  <Select
+                    aria-label="Новые альбомы видны"
+                    value={draft.visibility}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        visibility: e.target.value as Settings["visibility"],
+                      }))
+                    }
+                  >
+                    <option value="private">Только мне</option>
+                    <option value="family">Только семье</option>
+                    <option value="invited">По приглашению</option>
+                  </Select>
+                </div>
+                <div className="setting-row">
+                  <UserRound size={23} />
+                  <span>Распознавание лиц</span>
+                  <small>Недоступно · ручная разметка</small>
+                </div>
+                {toggleRow("geolocation", "Геолокация фото", MapPin)}
+                <small>
+                  GPS считывается только из новых загрузок. Доступ к
+                  существующим альбомам изменяется в их настройках.
+                </small>
+              </section>
+            )}
+          {!profileMode && shown("Уведомления комментарии общие альбомы") && (
             <section className="settings-card">
               <h2>
                 <Bell />
@@ -2569,106 +3350,121 @@ function SettingsPage({
           )}
         </div>
       </div>
-      <div className="save-settings">
-        <button
-          className="primary"
-          disabled={!dirty || busy}
-          onClick={async () => {
-            if (!requireUser()) return;
-            setBusy(true);
-            await perform(
-              () => api("/settings", "PATCH", draft),
-              "Настройки сохранены",
-            );
-            setBusy(false);
-          }}
-        >
-          <Check />
-          {busy ? "Сохранение…" : "Сохранить изменения"}
-        </button>
-      </div>
-      {shown(
-        "Хранилище резервное копирование экспорт восстановление семья выход",
-      ) && (
-        <section className="settings-card backup-card">
-          <h2>
-            <Shield />
-            Данные и доступ
-          </h2>
-          <p>
-            Занято {size(state.bytes)}. Резервная копия содержит ваши оригиналы
-            и коллекции. Храните её на другом диске.
-          </p>
-          <div className="backup-actions">
+      {!profileMode && (
+        <div className="save-settings">
+          <button
+            className="primary"
+            disabled={!dirty || busy}
+            onClick={async () => {
+              if (!requireUser()) return;
+              setBusy(true);
+              await perform(
+                () => api("/settings", "PATCH", draft),
+                "Настройки сохранены",
+              );
+              setBusy(false);
+            }}
+          >
+            <Check />
+            {busy ? "Сохранение…" : "Сохранить изменения"}
+          </button>
+        </div>
+      )}
+      {profileMode && user && (
+        <>
+          <CoverSettings user={user} state={state} perform={perform} />
+          <section className="settings-card">
+            <h2>
+              <Users />
+              Моя семья
+            </h2>
+            <FamilyPanel state={state} perform={perform} />
+          </section>
+          <div className="profile-actions">
+            <Link to="/settings">
+              Настройки приложения <ArrowRight size={17} />
+            </Link>
             <button
               className="secondary"
-              onClick={() => {
-                if (requireUser()) window.location.href = "/api/export";
+              onClick={async () => {
+                await api("/auth/logout", "POST");
+                window.location.href = "/";
               }}
             >
-              <Download size={18} />
-              Скачать резервную копию
+              <LogOut size={18} />
+              Выйти из аккаунта
             </button>
-            <label className="button secondary">
-              Восстановить копию
-              <input
-                hidden
-                type="file"
-                accept=".zip"
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  e.target.value = "";
-                  if (
-                    !file ||
-                    !requireUser() ||
-                    !confirm(
-                      "Импортировать копию как новые объекты? Текущие данные сохранятся.",
-                    )
-                  )
-                    return;
-                  setBackupMessage("Восстановление…");
-                  await perform(async () => {
-                    const data = new FormData();
-                    data.append("file", file);
-                    const r = await fetch("/api/restore", {
-                      method: "POST",
-                      body: data,
-                    });
-                    const b = await r.json();
-                    if (!r.ok) throw new Error(b.error);
-                  }, "Копия восстановлена");
-                  setBackupMessage("");
-                }}
-              />
-            </label>
-            <button
-              className="secondary"
-              onClick={() => {
-                if (requireUser()) setModal({ type: "family" });
-              }}
-            >
-              <Users size={18} />
-              Семейный доступ
-            </button>
-            {user && (
+          </div>
+        </>
+      )}
+      {!profileMode &&
+        shown("Хранилище резервное копирование экспорт восстановление") && (
+          <section className="settings-card backup-card">
+            <h2>
+              <Shield />
+              Данные и резервные копии
+            </h2>
+            <p>
+              Занято {size(state.bytes)}. Резервная копия содержит ваши
+              оригиналы и коллекции. Храните её на другом диске.
+            </p>
+            <div className="backup-actions">
               <button
                 className="secondary"
-                onClick={async () => {
-                  await api("/auth/logout", "POST");
-                  window.location.href = "/";
+                onClick={() => {
+                  if (requireUser()) window.location.href = "/api/export";
                 }}
               >
-                <LogOut size={18} />
-                Выйти
+                <Download size={18} />
+                Скачать резервную копию
               </button>
-            )}
-          </div>
-          {backupMessage && <p role="status">{backupMessage}</p>}
-        </section>
-      )}
+              <label className="button secondary">
+                Восстановить копию
+                <input
+                  hidden
+                  type="file"
+                  accept=".zip"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = "";
+                    if (
+                      !file ||
+                      !requireUser() ||
+                      !(await confirm(
+                        "Импортировать копию как новые объекты? Текущие данные сохранятся.",
+                      ))
+                    )
+                      return;
+                    setBackupMessage("Восстановление…");
+                    await perform(async () => {
+                      const data = new FormData();
+                      data.append("file", file);
+                      const r = await fetch("/api/restore", {
+                        method: "POST",
+                        body: data,
+                      });
+                      const b = await r.json();
+                      if (!r.ok) throw new Error(b.error);
+                    }, "Копия восстановлена");
+                    setBackupMessage("");
+                  }}
+                />
+              </label>
+            </div>
+            {backupMessage && <p role="status">{backupMessage}</p>}
+          </section>
+        )}
       {profile && user && (
-        <ModalFrame title="Изменить профиль" onClose={() => setProfile(false)}>
+        <ModalFrame
+          title="Изменить профиль"
+          onClose={() => {
+            setProfile(false);
+            setDraft(user.settings);
+            setProfileError("");
+          }}
+        >
           <form
+            noValidate
             onSubmit={async (e) => {
               e.preventDefault();
               setBusy(true);
@@ -2684,8 +3480,7 @@ function SettingsPage({
               try {
                 await api("/profile", "PATCH", data);
                 if (draft.avatar !== user.settings.avatar)
-                  await api("/settings", "PATCH", {
-                    ...user.settings,
+                  await api("/profile/appearance", "PATCH", {
                     avatar: draft.avatar,
                   });
                 await perform(async () => {}, "Профиль обновлён");
@@ -2773,7 +3568,7 @@ function SettingsPage({
             </label>
             <label>
               Аватар из загруженных фотографий
-              <select
+              <Select
                 value={draft.avatar || ""}
                 onChange={(e) =>
                   setDraft((d) => ({ ...d, avatar: e.target.value }))
@@ -2796,7 +3591,7 @@ function SettingsPage({
                       {m.name}
                     </option>
                   ))}
-              </select>
+              </Select>
               <small>Аватар сохранится вместе с профилем.</small>
             </label>
             <p className="error">{profileError}</p>
@@ -2804,7 +3599,11 @@ function SettingsPage({
               <button
                 type="button"
                 className="secondary"
-                onClick={() => setProfile(false)}
+                onClick={() => {
+                  setProfile(false);
+                  setDraft(user.settings);
+                  setProfileError("");
+                }}
               >
                 Отмена
               </button>
@@ -2820,6 +3619,8 @@ function SettingsPage({
 }
 createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
-    <App />
+    <DialogProvider>
+      <App />
+    </DialogProvider>
   </BrowserRouter>,
 );

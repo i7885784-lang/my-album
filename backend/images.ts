@@ -16,12 +16,22 @@ const orientationFilters: Record<number, string[]> = {
 };
 
 /** Native FFmpeg works on Windows x86 without WebAssembly SIMD. */
-export async function createImageThumbnail(input: string, output: string) {
+export async function createImageThumbnail(
+  input: string,
+  output: string,
+  banner = false,
+) {
   const orientation = await exifr.orientation(input).catch(() => undefined);
   const filters = [
     ...(orientationFilters[orientation || 1] || []),
-    "scale=w='min(600,iw)':h='min(450,ih)':force_original_aspect_ratio=increase",
-    "crop=w='min(600,iw)':h='min(450,ih)'",
+    ...(banner
+      ? [
+          "scale=w='min(1920,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease",
+        ]
+      : [
+          "scale=w='min(600,iw)':h='min(450,ih)':force_original_aspect_ratio=increase",
+          "crop=w='min(600,iw)':h='min(450,ih)'",
+        ]),
   ];
   try {
     const log = await new Promise<string>((resolve, reject) => {

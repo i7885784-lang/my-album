@@ -367,3 +367,116 @@ test("guest access is read-only and other users' trash stays hidden", async () =
     ),
   );
 });
+
+test("profile cover is persistent, private and preserved by legacy settings updates", async () => {
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([fs.readFileSync(path.join(storage, "fixture.png"))], {
+      type: "image/png",
+    }),
+    "Обложка.png",
+  );
+  const uploaded = await fetch(base + "/api/media/upload", {
+    method: "POST",
+    headers: { Cookie: cookie },
+    body: form,
+  });
+  assert.equal(uploaded.status, 201);
+  const image = (await uploaded.json()).id;
+  assert.equal(
+    (
+      await request("/profile/appearance", "PATCH", {
+        heroImage: image,
+        heroPosition: 73,
+        avatar: image,
+      })
+    ).response.status,
+    200,
+  );
+  const albumWithCover = (
+    await request("/entities/albums", "POST", {
+      name: "Обложка альбома",
+      cover: image,
+    })
+  ).data.id;
+  const state = (await request("/state")).data;
+  assert.equal(state.user.settings.heroPosition, 73);
+  assert.equal(state.user.settings.heroImage, image);
+  const cover = await fetch(base + "/api/files/" + image + "/hero", {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(cover.status, 200);
+  assert.match(cover.headers.get("content-type") || "", /image\/webp/);
+  assert.equal(
+    (await fetch(base + "/api/files/" + image + "/hero")).status,
+    401,
+  );
+  assert.equal(
+    (await request("/profile/appearance", "PATCH", { heroImage: image }, other))
+      .response.status,
+    403,
+  );
+  assert.equal(
+    (await request("/profile/appearance", "PATCH", { heroPosition: 101 }))
+      .response.status,
+    400,
+  );
+  await request("/settings", "PATCH", {
+    theme: "light",
+    visibility: "private",
+    geolocation: false,
+    commentNotifications: true,
+    sharedNotifications: false,
+  });
+  const settings = (await request("/me")).data.settings;
+  assert.equal(settings.heroImage, image);
+  assert.equal(settings.avatar, image);
+  assert.equal(settings.heroPosition, 73);
+  await request("/media/batch", "POST", { ids: [image], action: "trash" });
+  await request("/media/batch", "POST", { ids: [image], action: "permanent" });
+  const cleared = (await request("/me")).data.settings;
+  assert.equal(cleared.heroImage, "");
+  assert.equal(cleared.avatar, undefined);
+  assert.equal(
+    (await request("/state")).data.entities.find(
+      (e: any) => e.id === albumWithCover,
+    ).cover,
+    "",
+  );
+  assert.equal(
+    fs.existsSync(path.join(storage, "previews", image + "-hero.webp")),
+    false,
+  );
+});
+test("invites target the selected family and duplicate joins preserve the invitation", async () => {
+  const ownerState = (await request("/state")).data;
+  const space = ownerState.spaces.find((s: any) => s.role === "owner").id;
+  const token = (await request("/invites", "POST", { role: "member", space }))
+    .data.token;
+  assert.equal(
+    (await request("/invites/join", "POST", { token })).response.status,
+    409,
+  );
+  const registered = await request("/auth/register", "POST", {
+    name: "Новый родственник",
+    email: "new-relative@example.test",
+    password: "relative-testing-password",
+  });
+  const relative = registered.response.headers.get("set-cookie")!.split(";")[0];
+  const joined = await request("/invites/join", "POST", { token }, relative);
+  assert.equal(joined.response.status, 200);
+  assert.equal(joined.data.space, space);
+  assert.equal(
+    (await request("/invites", "POST", { role: "member", space }, relative))
+      .response.status,
+    403,
+  );
+  const state = (await request("/state", "GET", undefined, relative)).data;
+  assert.equal(
+    state.members.filter(
+      (m: any) => m.space === space && m.id === state.user.id,
+    ).length,
+    1,
+  );
+});
