@@ -96,10 +96,12 @@ export async function api(
   return data;
 }
 export const size = (bytes: number) =>
-  bytes < 1024 * 1024
-    ? (bytes / 1024).toFixed(0) + " КБ"
-    : bytes < 1024 ** 3
-      ? (bytes / 1024 ** 2).toFixed(1) + " МБ"
-      : (bytes / 1024 ** 3).toFixed(2) + " ГБ";
+  bytes < 1024
+    ? Math.max(0, Math.round(bytes)) + " Б"
+    : bytes < 1024 * 1024
+      ? (bytes / 1024).toFixed(0) + " КБ"
+      : bytes < 1024 ** 3
+        ? (bytes / 1024 ** 2).toFixed(1) + " МБ"
+        : (bytes / 1024 ** 3).toFixed(2) + " ГБ";
 export const date = (value: string) =>
   new Date(value).toLocaleDateString("ru-RU");

@@ -635,12 +635,24 @@ test("manual places, shared uploads, family restrictions and storage are enforce
     zip.getEntry("manifest.json")!.getData().toString(),
   );
   assert.ok(!manifest.media.some((m: any) => m.id === shared.data.id));
+  const emptyStats = (await request("/storage", "GET", undefined, outsider))
+    .data;
+  assert.deepEqual(emptyStats, {
+    originals: 0,
+    thumbnails: 0,
+    previews: 0,
+    used: 0,
+    photos: 0,
+    videos: 0,
+    trash: 0,
+  });
   const stats = (await request("/storage", "GET", undefined, parent)).data;
+  assert.equal(stats.used, stats.originals + stats.thumbnails + stats.previews);
+  assert.ok(!("free" in stats) && !("total" in stats));
   assert.ok(
     stats.originals > 0 &&
       stats.thumbnails > 0 &&
-      stats.used >= stats.originals &&
-      stats.free >= 0,
+      stats.used >= stats.originals,
   );
   assert.equal(
     (

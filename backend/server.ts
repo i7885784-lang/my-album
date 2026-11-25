@@ -473,14 +473,11 @@ app.get("/api/storage", (req, res) => {
       bytesAt("previews", f.id + "-hero.webp"),
     0,
   );
-  const disk = fs.statfsSync(store);
   res.json({
     originals,
     thumbnails,
     previews,
     used: originals + thumbnails + previews,
-    free: disk.bavail * disk.bsize,
-    total: disk.blocks * disk.bsize,
     photos: files.filter((f) => !f.deleted && f.mime.startsWith("image"))
       .length,
     videos: files.filter((f) => !f.deleted && f.mime.startsWith("video"))

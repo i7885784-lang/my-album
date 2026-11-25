@@ -274,8 +274,6 @@ type StorageInfo = {
   originals: number;
   thumbnails: number;
   previews: number;
-  free: number;
-  total: number;
   photos: number;
   videos: number;
   trash: number;
@@ -307,32 +305,17 @@ export function StoragePanel({
           Хранилище
         </span>
         <strong>{info ? size(info.used) : "…"}</strong>
-        {info && (
-          <>
-            <div
-              className="storage-meter"
-              aria-label="Использование диска"
-              role="meter"
-              aria-valuenow={Math.round(
-                ((info.total - info.free) / Math.max(info.total, 1)) * 100,
-              )}
-              aria-valuemin={0}
-              aria-valuemax={100}
-            >
-              <i
-                style={{
-                  width:
-                    Math.min(
-                      100,
-                      ((info.total - info.free) / Math.max(info.total, 1)) *
-                        100,
-                    ) + "%",
-                }}
-              />
-            </div>
-            <small>На диске свободно {size(info.free)}</small>
-          </>
-        )}
+        {info ? (
+          <small>
+            {info.used === 0
+              ? "Архив пуст"
+              : info.photos || info.videos
+                ? `${info.photos} фото · ${info.videos} видео`
+                : "Файлы в корзине"}
+          </small>
+        ) : error ? (
+          <small role="status">Сведения временно недоступны</small>
+        ) : null}
       </Link>
     );
   return (
@@ -361,20 +344,13 @@ export function StoragePanel({
               </div>
             ))}
           </div>
-          <div className="storage-meter">
-            <i
-              style={{
-                width:
-                  Math.min(
-                    100,
-                    ((info.total - info.free) / Math.max(info.total, 1)) * 100,
-                  ) + "%",
-              }}
-            />
-          </div>
-          <p>
-            На диске сервера свободно {size(info.free)} из {size(info.total)}.
-            Это общий диск, отдельная квота для семьи не установлена.
+          <p className="storage-account-note">
+            {info.used === 0
+              ? "Архив пуст. После загрузки здесь появится объём ваших файлов."
+              : "Здесь учтены только ваши файлы, включая корзину. Файлы других участников в этот объём не входят."}
+          </p>
+          <p className="storage-limit-note">
+            Лимит аккаунта пока не установлен.
           </p>
           {info.trash > 0 && (
             <Link to="/trash">
