@@ -4,7 +4,6 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import sharp from "sharp";
 import ffmpeg from "@ffmpeg-installer/ffmpeg";
 const storage = fs.mkdtempSync(path.join(os.tmpdir(), "album-test-"));
 const base = "http://127.0.0.1:3199";
@@ -90,11 +89,21 @@ test("registration, session security, creation, uploads, access, persistence and
     if (kind === "people") person = r.data.id;
     if (kind === "tags") tag = r.data.id;
   }
-  const buffer = await sharp({
-    create: { width: 50, height: 50, channels: 3, background: "#7043c7" },
-  })
-    .png()
-    .toBuffer();
+  const fixture = path.join(storage, "fixture.png");
+  const generatedImage = spawnSync(ffmpeg.path, [
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=0x7043c7:s=50x50:d=1",
+    "-frames:v",
+    "1",
+    "-threads",
+    "1",
+    fixture,
+  ]);
+  assert.equal(generatedImage.status, 0);
+  const buffer = fs.readFileSync(fixture);
   const form = new FormData();
   form.append(
     "file",

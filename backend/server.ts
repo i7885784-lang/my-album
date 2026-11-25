@@ -1,6 +1,6 @@
 import express from "express";
 import multer from "multer";
-import sharp from "sharp";
+import { createImageThumbnail, ImageProcessingError } from "./images";
 import exifr from "exifr";
 import { fileTypeFromFile } from "file-type";
 import { DatabaseSync } from "node:sqlite";
@@ -572,16 +572,9 @@ app.post("/api/media/upload", upload.single("file"), async (req, res, next) => {
       height: null | number = null,
       meta: Row = {};
     if (detected.mime.startsWith("image/")) {
-      const info = await sharp(f.path, {
-        limitInputPixels: 100000000,
-      }).metadata();
-      width = info.width || null;
-      height = info.height || null;
-      await sharp(f.path)
-        .rotate()
-        .resize(600, 450, { fit: "cover", withoutEnlargement: true })
-        .webp({ quality: 82 })
-        .toFile(thumb);
+      const info = await createImageThumbnail(f.path, thumb);
+      width = info.width;
+      height = info.height;
       const exif = await exifr.parse(f.path).catch(() => null);
       if (exif) {
         if (exif.DateTimeOriginal)
@@ -933,11 +926,9 @@ app.post("/api/restore", upload.single("file"), async (req, res, next) => {
       if (type.mime.startsWith("image/")) {
         const thumb = path.join(store, "thumbnails", id + ".webp");
         made.push(thumb);
-        await sharp(dest)
-          .rotate()
-          .resize(600, 450, { fit: "cover" })
-          .webp()
-          .toFile(thumb);
+        const info = await createImageThumbnail(dest, thumb);
+        m.width = info.width;
+        m.height = info.height;
       }
       if (type.mime.startsWith("video/")) {
         made.push(
@@ -1033,11 +1024,13 @@ app.use(
     const status =
       error instanceof HttpError
         ? error.status
-        : error instanceof z.ZodError
-          ? 400
-          : error instanceof multer.MulterError
-            ? 413
-            : 500;
+        : error instanceof ImageProcessingError
+          ? 422
+          : error instanceof z.ZodError
+            ? 400
+            : error instanceof multer.MulterError
+              ? 413
+              : 500;
     if (status === 500) console.error(error);
     res.status(status).json({
       error:
