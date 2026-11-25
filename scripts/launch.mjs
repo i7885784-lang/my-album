@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 const root = path.resolve(import.meta.dirname, "..");
-if (Number(process.versions.node.split(".")[0]) < 24) {
-  console.error("Требуется Node.js 24 LTS или новее. https://nodejs.org/");
+const [major, minor] = process.versions.node.split(".").map(Number);
+if (major < 22 || (major === 22 && minor < 13)) {
+  console.error("Требуется Node.js 22.13 или новее. https://nodejs.org/");
   process.exit(1);
 }
 const port = process.env.PORT || "3000",
