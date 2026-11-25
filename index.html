@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script>
+      try {
+        var savedTheme = localStorage.getItem("album-theme");
+        if (savedTheme === "dark" || savedTheme === "light") {
+          document.documentElement.dataset.theme = savedTheme;
+          document.documentElement.style.colorScheme = savedTheme;
+        }
+      } catch {}
+    </script>
     <meta name="theme-color" content="#7043c7" />
     <title>Семейные альбомы</title>
   </head>

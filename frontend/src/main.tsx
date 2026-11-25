@@ -10,6 +10,8 @@ import React, {
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import Landing from "./Landing";
+import { ThemeProvider, useTheme } from "./theme";
+import type { Theme } from "./theme";
 import {
   BrowserRouter,
   Link,
@@ -92,6 +94,7 @@ const navigation = [
   ["/photos", "Все фото", Images],
   ["/videos", "Видео", Video],
   ["/favorites", "Избранное", Heart],
+  ["/memories", "Воспоминания", Calendar],
   ["/people", "Люди", UserRound],
   ["/places", "Места", MapPin],
   ["/tags", "Теги", Tag],
@@ -188,6 +191,7 @@ function ModalFrame({
 }
 function App() {
   const { confirm } = useDialogs();
+  const { setTheme, adoptTheme, markSaved, getPreference } = useTheme();
   const location = useLocation(),
     navigate = useNavigate(),
     page = location.pathname.split("/")[1] || "home",
@@ -226,23 +230,39 @@ function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-  useEffect(() => {
-    let saved = "light";
-    try {
-      saved = localStorage.getItem("album-theme") || "light";
-    } catch {}
-    const theme = state.user?.settings.theme || saved;
-    document.documentElement.dataset.theme = theme;
-    if (state.user)
-      try {
-        localStorage.setItem("album-theme", theme);
-      } catch {}
-  }, [state.user?.settings.theme]);
+  useLayoutEffect(() => {
+    if (!state.user) return;
+    const account = state.user;
+    const preference = getPreference();
+    if (preference && preference.theme !== account.settings.theme) {
+      const chosen = preference.theme;
+      void api("/settings", "PATCH", { theme: chosen })
+        .then(() => {
+          if (getPreference()?.theme !== chosen) return;
+          markSaved(chosen);
+          setState((current) =>
+            current.user?.id === account.id
+              ? {
+                  ...current,
+                  user: {
+                    ...current.user,
+                    settings: { ...current.user.settings, theme: chosen },
+                  },
+                }
+              : current,
+          );
+        })
+        .catch(() => {
+          /* Keep the device preference until the next successful save. */
+        });
+    } else adoptTheme(preference?.theme || account.settings.theme);
+  }, [state.user?.id]);
   useEffect(() => {
     if (!loading && !state.user && location.pathname !== "/")
       navigate("/", { replace: true });
   }, [loading, state.user?.id, location.pathname]);
   useEffect(() => {
+    window.scrollTo(0, 0);
     setCategory("");
     setNotifications(false);
     setSelected([]);
@@ -280,6 +300,24 @@ function App() {
       document.removeEventListener("keydown", escape);
     };
   }, [notifications]);
+  useEffect(() => {
+    const viewport = window.matchMedia(
+      "(max-width:760px), (max-width:1000px) and (max-height:500px)",
+    );
+    const resize = () => {
+      if (!viewport.matches) setMobile(false);
+    };
+    viewport.addEventListener("change", resize);
+    return () => viewport.removeEventListener("change", resize);
+  }, []);
+  useEffect(() => {
+    if (!mobile) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobile(false);
+    };
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [mobile]);
   const requireUser = () => {
     if (!state.user) {
       setModal({ type: "auth" });
@@ -422,7 +460,9 @@ function App() {
       v.includes(id) ? v.filter((x) => x !== id) : [...v, id],
     );
   const cards = (files: Media[], limit?: number) => (
-    <div className={"photo-grid " + (list ? "list-view" : "")}>
+    <div
+      className={"photo-grid " + (list && page !== "home" ? "list-view" : "")}
+    >
       {files.slice(0, limit || 200).map((m) => (
         <article
           key={m.id}
@@ -481,9 +521,11 @@ function App() {
               дней
             </small>
           ) : (
-            list && (
+            list &&
+            page !== "home" && (
               <span className="photo-caption">
-                {m.name} · {date(m.created)}
+                <span className="media-name">{m.name}</span>
+                <small>{date(m.created)}</small>
               </span>
             )
           )}
@@ -496,7 +538,7 @@ function App() {
       className={
         "entity-grid " +
         (page === "people" ? "people-grid " : "") +
-        (list ? "entity-list" : "")
+        (list && page !== "home" ? "entity-list" : "")
       }
     >
       {create && (
@@ -518,7 +560,8 @@ function App() {
             <div>
               <strong>
                 {e.kind === "tags" && <Tag size={17} />}{" "}
-                {e.kind === "places" && <MapPin size={17} />} {e.name}
+                {e.kind === "places" && <MapPin size={17} />}{" "}
+                <span className="entity-name">{e.name}</span>
               </strong>
               <span>{count(e)} фото</span>
             </div>
@@ -666,8 +709,11 @@ function App() {
     );
   return (
     <>
-      <aside className={mobile ? "sidebar open" : "sidebar"}>
-        <Link to="/" className="brand">
+      <aside
+        id="family-navigation"
+        className={mobile ? "sidebar open" : "sidebar"}
+      >
+        <Link to="/" className="brand" onClick={() => setMobile(false)}>
           <div className="brand-icon">
             <Images size={31} />
           </div>
@@ -682,6 +728,7 @@ function App() {
             <Link
               key={url}
               to={url}
+              onClick={() => setMobile(false)}
               className={
                 location.pathname === url ||
                 (url !== "/" && location.pathname.startsWith(url + "/"))
@@ -704,12 +751,14 @@ function App() {
               page === "settings" ? "settings-link active" : "settings-link"
             }
             to="/settings"
+            onClick={() => setMobile(false)}
           >
             <SettingsIcon size={23} />
             Настройки
           </Link>
         </div>
       </aside>
+      {mobile && <MobileNavigationLock />}
       {mobile && (
         <button
           className="mobile-shade"
@@ -722,6 +771,8 @@ function App() {
           <button
             className="icon mobile-menu"
             aria-label="Меню"
+            aria-expanded={mobile}
+            aria-controls="family-navigation"
             onClick={() => setMobile(!mobile)}
           >
             <Menu />
@@ -790,13 +841,14 @@ function App() {
               .map((e) => (
                 <button
                   key={e.id}
+                  aria-label={e.name}
                   onClick={() => {
                     navigate("/" + e.kind + "/" + e.id);
                     setQuery("");
                   }}
                 >
                   <FolderHeart size={17} />
-                  {e.name}
+                  <span className="result-name">{e.name}</span>
                   <small>
                     {
                       {
@@ -812,13 +864,15 @@ function App() {
             {media.slice(0, 5).map((m) => (
               <button
                 key={m.id}
+                aria-label={m.name}
                 onClick={() => {
                   setViewer(m.id);
                   setQuery("");
                 }}
               >
                 <Images size={17} />
-                {m.name}
+                <span className="result-name">{m.name}</span>
+                <small>{m.mime.startsWith("video") ? "Видео" : "Фото"}</small>
               </button>
             ))}
             {!media.length &&
@@ -947,6 +1001,19 @@ function App() {
                 <SettingsPage
                   user={state.user}
                   profileMode={page === "profile"}
+                  onThemeSaved={(theme) =>
+                    setState((current) =>
+                      current.user
+                        ? {
+                            ...current,
+                            user: {
+                              ...current.user,
+                              settings: { ...current.user.settings, theme },
+                            },
+                          }
+                        : current,
+                    )
+                  }
                   query={query}
                   requireUser={requireUser}
                   state={state}
@@ -1484,6 +1551,10 @@ function App() {
       {toast && <Toast message={toast} />}
     </>
   );
+}
+function MobileNavigationLock() {
+  useScrollLock();
+  return null;
 }
 function Toast({ message }: { message: string }) {
   const [container, setContainer] = useState<Element>(document.body);
@@ -2890,7 +2961,7 @@ function FamilyPanel({ state, perform }: { state: State; perform: Perform }) {
               </span>
               <div>
                 <strong>
-                  {m.name}
+                  <span className="person-name">{m.name}</span>
                   {m.id === state.user?.id && (
                     <small className="you-label">Вы</small>
                   )}
@@ -3139,6 +3210,7 @@ function CoverSettings({
 function SettingsPage({
   user,
   profileMode = false,
+  onThemeSaved,
   query,
   requireUser,
   state,
@@ -3147,6 +3219,7 @@ function SettingsPage({
 }: {
   user: User | null;
   profileMode?: boolean;
+  onThemeSaved: (theme: Theme) => void;
   query: string;
   requireUser: () => boolean;
   state: State;
@@ -3154,6 +3227,27 @@ function SettingsPage({
   setModal: (m: Modal | null) => void;
 }) {
   const { confirm } = useDialogs();
+  const { theme, setTheme, markSaved } = useTheme();
+  const [themeSaving, setThemeSaving] = useState(false),
+    [themeStatus, setThemeStatus] = useState("");
+  const changeTheme = async (next: Theme) => {
+    setTheme(next);
+    setThemeSaving(true);
+    setThemeStatus("Сохраняем тему…");
+    try {
+      await api("/settings", "PATCH", { theme: next });
+      markSaved(next);
+      onThemeSaved(next);
+      setThemeStatus("Тема сохранена");
+    } catch (e) {
+      setThemeStatus(
+        (e as Error).message +
+          ". Тема сохранена на этом устройстве. Нажмите на выбранную тему, чтобы повторить сохранение в аккаунте.",
+      );
+    } finally {
+      setThemeSaving(false);
+    }
+  };
   const navigate = useNavigate();
   const fallback: Settings = {
     theme: "light",
@@ -3169,17 +3263,18 @@ function SettingsPage({
     [backupMessage, setBackupMessage] = useState("");
   useEffect(() => {
     setDraft(user?.settings || fallback);
-  }, [user?.settings]);
+  }, [user?.id, profileMode]);
   const savedSettings = user?.settings || fallback;
-  const dirty = (
-    Object.keys({ ...savedSettings, ...draft }) as (keyof Settings)[]
-  ).some((key) => draft[key] !== savedSettings[key]);
-  useEffect(() => {
-    document.documentElement.dataset.theme = draft.theme;
-    return () => {
-      document.documentElement.dataset.theme = user?.settings.theme || "light";
-    };
-  }, [draft.theme, user?.settings.theme]);
+  const dirty =
+    !profileMode &&
+    (
+      [
+        "visibility",
+        "geolocation",
+        "commentNotifications",
+        "sharedNotifications",
+      ] as const
+    ).some((key) => draft[key] !== savedSettings[key]);
   useEffect(() => {
     if (!dirty) return;
     const handler = (e: BeforeUnloadEvent) => e.preventDefault();
@@ -3255,7 +3350,11 @@ function SettingsPage({
                   )}
                 </div>
                 <div>
-                  <h2>{user?.name || "Ваш профиль"}</h2>
+                  <h2>
+                    <span className="profile-name">
+                      {user?.name || "Ваш профиль"}
+                    </span>
+                  </h2>
                   <p>{user?.email || "Создайте личный аккаунт"}</p>
                   <button
                     className="tinted"
@@ -3279,20 +3378,26 @@ function SettingsPage({
               <p>Выберите тему оформления</p>
               <div className="theme-options">
                 <button
-                  className={draft.theme === "light" ? "chosen" : ""}
-                  onClick={() => setDraft((d) => ({ ...d, theme: "light" }))}
+                  className={theme === "light" ? "chosen" : ""}
+                  disabled={themeSaving}
+                  onClick={() => void changeTheme("light")}
                 >
                   <Sun />
-                  Светлая тема{draft.theme === "light" && <Check size={18} />}
+                  Светлая тема{theme === "light" && <Check size={18} />}
                 </button>
                 <button
-                  className={draft.theme === "dark" ? "chosen" : ""}
-                  onClick={() => setDraft((d) => ({ ...d, theme: "dark" }))}
+                  className={theme === "dark" ? "chosen" : ""}
+                  disabled={themeSaving}
+                  onClick={() => void changeTheme("dark")}
                 >
                   <Moon />
-                  Тёмная тема{draft.theme === "dark" && <Check size={18} />}
+                  Тёмная тема{theme === "dark" && <Check size={18} />}
                 </button>
               </div>
+              <small className="theme-status" role="status">
+                {themeStatus ||
+                  "Тема применяется ко всем страницам и сохраняется автоматически."}
+              </small>
             </section>
           )}
         </div>
@@ -3359,7 +3464,14 @@ function SettingsPage({
               if (!requireUser()) return;
               setBusy(true);
               await perform(
-                () => api("/settings", "PATCH", draft),
+                () =>
+                  api("/settings", "PATCH", {
+                    theme,
+                    visibility: draft.visibility,
+                    geolocation: draft.geolocation,
+                    commentNotifications: draft.commentNotifications,
+                    sharedNotifications: draft.sharedNotifications,
+                  }),
                 "Настройки сохранены",
               );
               setBusy(false);
@@ -3619,8 +3731,10 @@ function SettingsPage({
 }
 createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
-    <DialogProvider>
-      <App />
-    </DialogProvider>
+    <ThemeProvider>
+      <DialogProvider>
+        <App />
+      </DialogProvider>
+    </ThemeProvider>
   </BrowserRouter>,
 );

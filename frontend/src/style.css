@@ -116,6 +116,7 @@ option {
   padding: 5px;
 }
 label {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -1321,9 +1322,16 @@ dialog::backdrop {
   display: flex;
   align-items: center;
 }
-.entity-list .entity-card img {
+.entity-list .entity-card img,
+.entity-list .no-cover {
   width: 90px;
   height: 80px;
+  flex-shrink: 0;
+}
+.entity-list .entity-card a > div:not(.no-cover) {
+  flex: 1;
+  min-width: 0;
+  padding-right: 38px;
 }
 .entity-list .create-card {
   min-height: 80px;
@@ -1463,7 +1471,7 @@ dialog::backdrop {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 }
-@media (max-width: 760px) {
+@media (max-width: 760px), (max-width: 1000px) and (max-height: 500px) {
   .sidebar {
     transform: translateX(-100%);
     transition: transform 0.2s;
@@ -1880,7 +1888,7 @@ dialog::backdrop {
   margin: 20px 0;
   font-size: 13px;
 }
-@media (max-width: 760px) {
+@media (max-width: 760px), (max-width: 1000px) and (max-height: 500px) {
   .search-results {
     left: 15px;
     right: 15px;
@@ -1924,7 +1932,7 @@ dialog::backdrop {
     grid-template-columns: minmax(0, 1fr);
   }
 }
-@media (max-width: 760px) {
+@media (max-width: 760px), (max-width: 1000px) and (max-height: 500px) {
   .theme-options button {
     min-width: 0;
     white-space: normal;
@@ -2054,6 +2062,8 @@ input[type="range"] {
   position: relative;
 }
 .select-trigger {
+  min-width: 0;
+  max-width: 100%;
   width: 100%;
   min-height: 44px;
   border: 1px solid var(--border);
@@ -2660,6 +2670,7 @@ dialog[open] {
 }
 .cover-settings {
   margin-top: 20px;
+  margin-bottom: 20px;
 }
 .cover-preview {
   aspect-ratio: 4/1;
@@ -3468,7 +3479,7 @@ dialog[open] {
     min-width: 0;
   }
 }
-@media (max-width: 760px) {
+@media (max-width: 760px), (max-width: 1000px) and (max-height: 500px) {
   dialog {
     width: calc(100vw - 20px);
     max-height: calc(100dvh - 20px);
@@ -3914,4 +3925,352 @@ dialog[open] {
 .button:hover {
   color: var(--primary);
   background: var(--surface2);
+}
+/* Persistent appearance and bounded names */
+.app-body {
+  position: relative;
+  min-width: 0;
+}
+.search-results {
+  left: 28px;
+  top: 64px;
+  width: min(640px, calc(100% - 56px));
+  max-width: calc(100% - 56px);
+}
+.search-results button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  text-align: left;
+  min-width: 0;
+  width: 100%;
+  padding: 11px 12px;
+}
+.search-results button > svg {
+  flex-shrink: 0;
+}
+.result-name,
+.entity-name,
+.media-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-results .result-name {
+  display: block;
+  font-size: 13px;
+  text-align: left;
+}
+.search-results small {
+  margin-left: 0;
+  max-width: 85px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.entity-card strong {
+  min-width: 0;
+}
+.entity-card strong .entity-name {
+  flex: 1;
+  display: block;
+  font: inherit;
+  color: inherit;
+  margin: 0;
+}
+.list-view .photo-caption {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px;
+}
+.list-view .media-name {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+}
+.list-view .photo-caption small {
+  font-size: 11px;
+}
+.choice-panel button[role="option"] > span:not(.choice-check) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.theme-status {
+  display: block;
+  margin-top: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.hero.page-heading .hero-copy {
+  min-width: 0;
+  max-width: 100%;
+}
+.hero.page-heading h1 {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.photo-information p {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1100px) {
+  .search-results {
+    left: 20px;
+    width: calc(100% - 40px);
+    max-width: 640px;
+  }
+}
+@media (max-width: 760px), (max-width: 1000px) and (max-height: 500px) {
+  .search-results {
+    left: 12px;
+    top: 64px;
+    width: calc(100% - 24px);
+    max-width: calc(100% - 24px);
+    max-height: min(60dvh, 480px);
+    overflow: auto;
+    padding: 14px;
+  }
+  .search-results h3 {
+    font-size: 14px;
+    margin-bottom: 8px;
+  }
+  .search-results button {
+    padding: 11px 6px;
+    gap: 8px;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+  }
+  .search-results small {
+    max-width: 55px;
+    font-size: 10px;
+  }
+  .search-results .result-name {
+    font-size: 12px;
+  }
+  .hero.home-hero,
+  [data-theme="dark"] .hero.home-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-height: 0;
+    max-height: none;
+    aspect-ratio: auto;
+    padding: 0;
+    background: none !important;
+    gap: 0;
+  }
+  .hero.home-hero::before {
+    content: "";
+    display: block;
+    width: 100%;
+    aspect-ratio: 2.4/1;
+    background-image: var(--hero-image, url("/assets/family-hero.jpg"));
+    background-size: cover;
+    background-position: center var(--hero-position, 50%);
+  }
+  .home-hero .hero-copy {
+    width: 100%;
+    padding: 22px 18px 24px;
+  }
+  .home-hero h1 {
+    font-size: clamp(26px, 7.3vw, 34px);
+    line-height: 1.15;
+    letter-spacing: -0.8px;
+    overflow-wrap: normal;
+  }
+  .home-hero p {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .hero-actions {
+    gap: 9px;
+  }
+  .landing-hero {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 26px 22px 20px;
+    background: var(--surface2);
+  }
+  .landing-hero::after {
+    content: "";
+    display: block;
+    width: 100%;
+    aspect-ratio: 2.35/1;
+    background: url("/assets/family-hero.jpg") center center/cover;
+    border-radius: 15px;
+    margin-top: 25px;
+  }
+  .landing-hero h1 {
+    font-size: clamp(27px, 8.1vw, 39px);
+    line-height: 1.12;
+    letter-spacing: -1px;
+    overflow-wrap: normal;
+  }
+  .landing-hero p {
+    max-width: 100%;
+    font-size: 13px;
+    line-height: 1.65;
+  }
+  .landing-hero > div {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .landing-eyebrow {
+    margin-bottom: 18px;
+    font-size: 11px;
+  }
+  .landing-actions {
+    align-items: stretch;
+  }
+  .landing-actions button {
+    width: 100%;
+    min-width: 0;
+  }
+  .hero.page-heading h1 {
+    font-size: clamp(24px, 7vw, 30px);
+    gap: 10px;
+  }
+  .hero.page-heading h1 > svg {
+    width: 30px;
+    height: 30px;
+    flex-shrink: 0;
+  }
+  .entity-card strong .entity-name {
+    font-size: 12px;
+  }
+  .list-view .media-name {
+    font-size: 12px;
+  }
+}
+.sidebar nav {
+  min-height: 0;
+  overflow-y: auto;
+  flex: 1;
+  overscroll-behavior: contain;
+}
+.sidebar-bottom {
+  flex-shrink: 0;
+  margin-top: 14px;
+}
+.brand {
+  flex-shrink: 0;
+}
+.person-name,
+.profile-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+.member-row strong .person-name {
+  flex: 1;
+}
+.member-row > div > small {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.profile-card h2 {
+  max-width: 100%;
+}
+.profile-card p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.comment-heading strong {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.notification-panel button {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px), (max-width: 1000px) and (max-height: 500px) {
+  .notification-button {
+    display: inline-flex;
+    width: 32px;
+    height: 36px;
+  }
+  .topbar {
+    gap: 5px;
+  }
+  .mobile-shade {
+    touch-action: none;
+  }
+  .theme-options {
+    flex-wrap: wrap;
+  }
+  .theme-options button {
+    min-width: 125px;
+  }
+  .choice-panel {
+    max-width: calc(100vw - 20px);
+  }
+}
+@media (max-width: 360px) {
+  .member-row {
+    display: grid;
+    grid-template-columns: 33px minmax(0, 1fr) 30px;
+    column-gap: 9px;
+    row-gap: 7px;
+  }
+  .member-avatar {
+    grid-row: span 2;
+  }
+  .member-row > div {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .member-row .role-badge {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
+  .member-row > button {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    width: 30px;
+    height: 30px;
+    padding: 6px;
+  }
+  .member-row > div > small {
+    font-size: 10px;
+  }
+  .topbar {
+    padding-left: 9px;
+    padding-right: 9px;
+    gap: 3px;
+  }
+  .search {
+    gap: 7px;
+    padding-left: 10px;
+    padding-right: 8px;
+  }
+  .search input {
+    font-size: 12px;
+  }
+  .brand b {
+    font-size: 18px;
+  }
+}
+.sidebar nav a {
+  min-width: 0;
+  gap: 13px;
+  font-size: 14px;
 }

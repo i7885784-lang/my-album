@@ -84,14 +84,12 @@ with sync_playwright() as p:
     expect(page.locator(".photo-card")).to_have_count(0)
     page.goto(base+"/settings")
     page.get_by_role("button",name="Тёмная тема",exact=False).click()
-    page.get_by_role("button",name="Сохранить изменения",exact=True).click()
-    expect(page.locator(".toast")).to_contain_text("Настройки сохранены")
+    expect(page.locator(".theme-status")).to_contain_text("Тема сохранена")
     page.reload()
     expect(page.locator("html")).to_have_attribute("data-theme","dark")
     page.screenshot(path=str(screens/"settings-dark.png"))
     page.get_by_role("button",name="Светлая тема",exact=False).click()
-    page.get_by_role("button",name="Сохранить изменения",exact=True).click()
-    expect(page.locator(".toast")).to_contain_text("Настройки сохранены")
+    expect(page.locator(".theme-status")).to_contain_text("Тема сохранена")
     ffmpeg=subprocess.check_output(["node","-e","console.log(require('@ffmpeg-installer/ffmpeg').path)"],text=True).strip()
     videos=[]
     for extension,codec in [("mp4","libx264"),("webm","libvpx")]:

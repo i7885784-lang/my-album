@@ -138,8 +138,7 @@ with sync_playwright() as p:
         page.goto(base+"/settings")
         if theme=="dark":
             page.get_by_role("button",name="Тёмная тема",exact=False).click()
-            page.get_by_role("button",name="Сохранить изменения",exact=True).click()
-            expect(page.locator(".toast")).to_contain_text("Настройки сохранены")
+            expect(page.locator(".theme-status")).to_contain_text("Тема сохранена")
         expect(page.locator("html")).to_have_attribute("data-theme",theme)
         assert page.locator(".profile-card").count()==0
         page.screenshot(path=str(screens/("settings-"+theme+".png")),full_page=True)

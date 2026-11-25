@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useTheme } from "./theme";
 import {
   Images,
   ArrowRight,
@@ -22,9 +22,8 @@ export default function Landing({
   error?: string;
   onRetry: () => void;
 }) {
-  const [dark, setDark] = useState(
-    document.documentElement.dataset.theme === "dark",
-  );
+  const { theme, setTheme } = useTheme();
+  const dark = theme === "dark";
   return (
     <div className="landing">
       <header className="landing-header">
@@ -46,14 +45,7 @@ export default function Landing({
           <button
             className="icon"
             aria-label="Переключить тему"
-            onClick={() => {
-              const next = !dark;
-              setDark(next);
-              document.documentElement.dataset.theme = next ? "dark" : "light";
-              try {
-                localStorage.setItem("album-theme", next ? "dark" : "light");
-              } catch {}
-            }}
+            onClick={() => setTheme(dark ? "light" : "dark")}
           >
             {dark ? <Sun size={20} /> : <Moon size={20} />}
           </button>
